@@ -48,7 +48,11 @@ jobs:
 
       - name: Rename AppImage
         run: |
-          mv DebGear*.AppImage DebGear-x86_64.AppImage
+          for file in DebGear*.AppImage; do
+            if [ "$file" != "DebGear-x86_64.AppImage" ]; then
+              mv "$file" DebGear-x86_64.AppImage
+            fi
+          done
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
