@@ -20,7 +20,7 @@ It provides a simple way to inspect detected hardware, installed drivers, APT pa
 - `nvidia-smi` verification
 - GTK 4 + Libadwaita interface
 
-## 🖥️ Requirements
+## Requirements
 
 DebGear is designed for Debian-based systems.
 
@@ -36,7 +36,7 @@ For NVIDIA functionality:
 sudo apt install nvidia-driver
 ```
 
-## ▶️ Running
+## Running
 
 Clone the repository:
 
@@ -51,7 +51,7 @@ Run:
 python3 debgear.py
 ```
 
-## 🟢 NVIDIA Driver Detection
+## NVIDIA Driver Detection
 
 DebGear checks the actual NVIDIA driver state instead of only checking whether the package is installed.
 
@@ -64,13 +64,13 @@ It checks:
 - APT candidate version
 - Newest available version
 
-## 🔧 NVIDIA Repair
+## NVIDIA Repair
 
 When the NVIDIA driver is not functioning correctly, DebGear can rebuild and reload the NVIDIA kernel module.
 
 Administrative operations are executed through `pkexec`.
 
-## 📦 Version Management
+## Version Management
 
 DebGear distinguishes between:
 
@@ -80,7 +80,7 @@ DebGear distinguishes between:
 
 This is especially useful when using Debian Backports.
 
-## ⚠️ Development Status
+## Development Status
 
 DebGear is currently in early development.
 
