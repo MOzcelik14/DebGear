@@ -24,11 +24,18 @@ jobs:
 
       - name: Prepare AppDir
         run: |
-          mkdir -p AppDir/usr/bin AppDir/usr/share/applications
+          mkdir -p AppDir/usr/bin
+          mkdir -p AppDir/usr/share/applications
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+
           cp debgear.py AppDir/usr/bin/debgear.py
-          printf "%s\n" "#!/bin/sh" "exec python3 /usr/bin/debgear.py \"\$@\"" > AppDir/usr/bin/debgear
+
+          printf "%s\n" "#!/bin/sh" "exec python3 /usr/bin/debgear.py \$@" > AppDir/usr/bin/debgear
           chmod +x AppDir/usr/bin/debgear
-          printf "%s\n" "[Desktop Entry]" "Name=DebGear" "Comment=Debian hardware and driver management" "Exec=debgear" "Terminal=false" "Type=Application" "Categories=System;Settings;" > AppDir/usr/share/applications/debgear.desktop
+
+          printf "%s\n" "[Desktop Entry]" "Name=DebGear" "Comment=Debian hardware and driver management" "Exec=debgear" "Icon=debgear" "Terminal=false" "Type=Application" "Categories=System;Settings;" > AppDir/usr/share/applications/debgear.desktop
+
+          printf "%s" "iVBORw0KGgoAAAANSUhEUgAAAQAAAAECAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > AppDir/usr/share/icons/hicolor/256x256/apps/debgear.png
 
       - name: Download linuxdeploy
         run: |
