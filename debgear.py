@@ -537,6 +537,14 @@ def check_nvidia_smi():
 
 # ============================================================
 # NVIDIA STATUS
+#
+# NOTE (fix): this is the single, authoritative place that computes
+# NVIDIA status for a refresh cycle. It used to be called up to 3
+# times per refresh (once in create_device_card, once again inside
+# create_status_widget, once more in update_global_status), each
+# time re-running lspci/lsmod/nvidia-smi/apt-cache. Now it is called
+# exactly once per refresh, cached, and the cached dict is threaded
+# through to whoever needs it.
 # ============================================================
 
 def get_nvidia_status():
@@ -757,7 +765,7 @@ def scan_hardware():
 
     result = []
 
-    for device in devices:
+    for index, device in enumerate(devices):
 
         vendor = device[
             "vendor"
@@ -826,6 +834,14 @@ def scan_hardware():
         )
 
         result.append({
+            # NOTE (fix): a stable per-device id, independent of the
+            # package name. Two NVIDIA GPUs would both have
+            # pkg == "nvidia-driver"; using the package name as the
+            # switches{} key silently dropped the first card's
+            # switch. "device_id" is unique per scan and used for
+            # the switch map instead, while "pkg" is kept separately
+            # for the actual install/remove action.
+            "device_id": index,
             "name": device["name"],
             "vendor": vendor,
             "device": device["device"],
@@ -867,11 +883,26 @@ class DriverWindow(
         )
 
         self.devices = []
+        # switches keyed by device_id (see scan_hardware note),
+        # value is (package_name, Gtk.Switch)
         self.switches = {}
+
+        # NOTE (fix): every button that triggers a privileged
+        # pkexec operation lives in this list so set_busy() can
+        # disable ALL of them at once, not just "Apply Changes".
+        # Previously Repair/Update stayed clickable while another
+        # operation was already running, which could fire two
+        # concurrent pkexec/apt-get calls against the same lock.
+        self.action_buttons = []
+        self.busy = False
+
+        # Cached result of the single get_nvidia_status() call
+        # for the current refresh cycle.
+        self.nvidia_status = None
 
         self.setup_css()
         self.build_ui()
-        self.refresh_devices()
+        self.start_refresh()
 
     # ========================================================
     # CSS
@@ -1246,6 +1277,10 @@ class DriverWindow(
             self.on_apply
         )
 
+        self.action_buttons.append(
+            self.apply_button
+        )
+
         bottom.append(
             self.apply_button
         )
@@ -1259,13 +1294,53 @@ class DriverWindow(
         )
 
     # ========================================================
-    # REFRESH
+    # REFRESH (fix: scanning now happens off the GTK thread)
     # ========================================================
 
-    def refresh_devices(self):
+    def start_refresh(self):
 
-        self.devices = scan_hardware()
+        self.set_busy(True)
 
+        self.bottom_status.set_text(
+            "Checking drivers..."
+        )
+
+        thread = threading.Thread(
+            target=self._scan_in_background,
+            daemon=True
+        )
+
+        thread.start()
+
+    def _scan_in_background(self):
+
+        # Runs off the main thread: scan_hardware() and
+        # get_nvidia_status() together issue a couple dozen
+        # subprocess calls (lspci, dpkg-query, apt-cache policy,
+        # apt-cache madison, lsmod, nvidia-smi). Doing this on the
+        # GTK thread is what caused the UI to freeze on startup and
+        # after every apply/update/repair.
+        devices = scan_hardware()
+
+        nvidia_status = None
+
+        if any(
+            d["vendor"] == "10de" and d["type"] == "gpu"
+            for d in devices
+        ):
+
+            nvidia_status = get_nvidia_status()
+
+        GLib.idle_add(
+            self._apply_refresh,
+            devices,
+            nvidia_status
+        )
+
+    def _apply_refresh(self, devices, nvidia_status):
+
+        self.devices = devices
+        self.nvidia_status = nvidia_status
         self.switches.clear()
 
         self.device_count.set_text(
@@ -1297,6 +1372,10 @@ class DriverWindow(
             )
 
         self.update_global_status()
+
+        self.set_busy(False)
+
+        return False
 
     # ========================================================
     # DEVICE CARD
@@ -1415,7 +1494,7 @@ class DriverWindow(
         )
 
         # ----------------------------------------------------
-        # STATUS
+        # STATUS (uses cached self.nvidia_status, no re-query)
         # ----------------------------------------------------
 
         status = self.create_status_widget(
@@ -1572,12 +1651,12 @@ class DriverWindow(
         )
 
         # ----------------------------------------------------
-        # NVIDIA ACTIONS
+        # NVIDIA ACTIONS (uses cached self.nvidia_status)
         # ----------------------------------------------------
 
-        if is_nvidia:
+        if is_nvidia and self.nvidia_status:
 
-            nvidia = get_nvidia_status()
+            nvidia = self.nvidia_status
 
             # -----------------------------------------------
             # UPDATE AVAILABLE
@@ -1626,6 +1705,15 @@ class DriverWindow(
                 update_button.connect(
                     "clicked",
                     self.on_nvidia_update
+                )
+
+                # fix: tracked so set_busy() disables it too
+                self.action_buttons.append(
+                    update_button
+                )
+
+                update_button.set_sensitive(
+                    not self.busy
                 )
 
                 update_row.append(
@@ -1687,6 +1775,15 @@ class DriverWindow(
                     self.on_nvidia_repair
                 )
 
+                # fix: tracked so set_busy() disables it too
+                self.action_buttons.append(
+                    repair_button
+                )
+
+                repair_button.set_sensitive(
+                    not self.busy
+                )
+
                 action_row.append(
                     repair_button
                 )
@@ -1724,9 +1821,13 @@ class DriverWindow(
                 Gtk.Align.CENTER
             )
 
+            # fix: keyed by device_id, not package name, so two
+            # devices sharing the same package (e.g. dual NVIDIA
+            # GPUs) each keep their own switch instead of the
+            # second one overwriting the first in the dict.
             self.switches[
-                device["pkg"]
-            ] = package_switch
+                device["device_id"]
+            ] = (device["pkg"], package_switch)
 
             package_row.append(
                 package_label
@@ -1743,7 +1844,7 @@ class DriverWindow(
         return card
 
     # ========================================================
-    # STATUS WIDGET
+    # STATUS WIDGET (uses cached self.nvidia_status)
     # ========================================================
 
     def create_status_widget(
@@ -1752,9 +1853,9 @@ class DriverWindow(
         is_nvidia
     ):
 
-        if is_nvidia:
+        if is_nvidia and self.nvidia_status:
 
-            nvidia = get_nvidia_status()
+            nvidia = self.nvidia_status
 
             status = nvidia[
                 "status"
@@ -1822,18 +1923,12 @@ class DriverWindow(
         return status_label
 
     # ========================================================
-    # GLOBAL STATUS
+    # GLOBAL STATUS (uses cached self.nvidia_status)
     # ========================================================
 
     def update_global_status(self):
 
-        nvidia_exists = any(
-            device["vendor"] == "10de"
-            and device["type"] == "gpu"
-            for device in self.devices
-        )
-
-        if not nvidia_exists:
+        if not self.nvidia_status:
 
             self.bottom_status.set_text(
                 "System drivers are working properly."
@@ -1841,7 +1936,7 @@ class DriverWindow(
 
             return
 
-        nvidia = get_nvidia_status()
+        nvidia = self.nvidia_status
 
         if nvidia["status"] == "active":
 
@@ -1896,19 +1991,23 @@ class DriverWindow(
         button
     ):
 
+        # fix: aggregate by package name, since several devices
+        # (device_id keys) can point at the same package.
+        wanted_state = {}
+
+        for device_id, (package, switch) in self.switches.items():
+
+            wanted_state[package] = switch.get_active()
+
         changes = []
 
-        for package, switch in (
-            self.switches.items()
-        ):
+        for package, active in wanted_state.items():
 
             installed, _ = (
                 get_installed_package_version(
                     package
                 )
             )
-
-            active = switch.get_active()
 
             if (
                 active
@@ -2021,7 +2120,10 @@ class DriverWindow(
         button
     ):
 
-        nvidia = get_nvidia_status()
+        if not self.nvidia_status:
+            return
+
+        nvidia = self.nvidia_status
 
         newest = nvidia[
             "newest_version"
@@ -2248,7 +2350,8 @@ echo "========================================"
         )
 
     # ========================================================
-    # BUSY
+    # BUSY (fix: now disables every tracked action button, not
+    # just "Apply Changes" — prevents overlapping pkexec calls)
     # ========================================================
 
     def set_busy(
@@ -2256,9 +2359,13 @@ echo "========================================"
         busy
     ):
 
-        self.apply_button.set_sensitive(
-            not busy
-        )
+        self.busy = busy
+
+        for button in self.action_buttons:
+
+            button.set_sensitive(
+                not busy
+            )
 
     # ========================================================
     # OPERATION FINISHED
@@ -2270,17 +2377,16 @@ echo "========================================"
         output
     ):
 
-        self.set_busy(
-            False
-        )
-
         if success:
 
             self.bottom_status.set_text(
                 "Operation completed successfully."
             )
 
-            self.refresh_devices()
+            # start_refresh() calls set_busy(True) itself and the
+            # background scan will call set_busy(False) when done,
+            # so we don't clear busy here first.
+            self.start_refresh()
 
             self.show_dialog(
                 "Operation Complete",
@@ -2288,6 +2394,10 @@ echo "========================================"
             )
 
         else:
+
+            self.set_busy(
+                False
+            )
 
             self.bottom_status.set_text(
                 "An error occurred during the operation."
