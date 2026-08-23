@@ -26,7 +26,7 @@ jobs:
         run: |
           mkdir -p AppDir/usr/bin
           mkdir -p AppDir/usr/share/applications
-          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps
+          mkdir -p AppDir/usr/share/icons/hicolor/256x256/apps AppDir/usr/share/icons/hicolor/scalable/apps
 
           cp debgear.py AppDir/usr/bin/debgear.py
 
@@ -35,7 +35,14 @@ jobs:
 
           printf "%s\n" "[Desktop Entry]" "Name=DebGear" "Comment=Debian hardware and driver management" "Exec=debgear" "Icon=debgear" "Terminal=false" "Type=Application" "Categories=System;Settings;" > AppDir/usr/share/applications/debgear.desktop
 
-          printf "%s" "iVBORw0KGgoAAAANSUhEUgAAAQAAAAECAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > AppDir/usr/share/icons/hicolor/256x256/apps/debgear.png
+          cat > AppDir/usr/share/icons/hicolor/scalable/apps/debgear.svg <<SVG
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <rect width="256" height="256" rx="48" fill="#202027"/>
+  <circle cx="128" cy="128" r="72" fill="none" stroke="#76b900" stroke-width="20"/>
+  <circle cx="128" cy="128" r="28" fill="#76b900"/>
+  <path d="M128 38v28M128 190v28M38 128h28M190 128h28" stroke="#76b900" stroke-width="18" stroke-linecap="round"/>
+</svg>
+SVG
 
       - name: Download linuxdeploy
         run: |
