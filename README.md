@@ -1,22 +1,22 @@
-# ⚙️ DebGear
+# DebGear
 
 **DebGear** is a lightweight graphical driver and hardware manager for Debian, built with **Python, GTK 4 and Libadwaita**.
 
 It provides a simple way to inspect detected hardware, installed drivers, APT package versions and NVIDIA driver status without manually running multiple terminal commands.
 
-## ✨ Features
+## Features
 
-- 🔍 Automatic hardware detection
-- 🎮 NVIDIA GPU detection
-- 🟢 NVIDIA driver status monitoring
-- 📦 Installed driver version detection
-- 📋 APT candidate version detection
-- 🔎 Detection of the newest available package version
-- 📚 Debian / Backports repository detection
-- 🧩 DKMS support
-- 🐧 Kernel header detection
-- 🔧 NVIDIA driver repair
-- 📈 NVIDIA driver update detection
+- Automatic hardware detection
+- NVIDIA GPU detection
+- NVIDIA driver status monitoring
+- Installed driver version detection
+- APT candidate version detection
+- Detection of the newest available package version
+- Debian / Backports repository detection
+- DKMS support
+- Kernel header detection
+- NVIDIA driver repair
+- NVIDIA driver update detection
 - `nvidia-smi` verification
 - GTK 4 + Libadwaita interface
 
