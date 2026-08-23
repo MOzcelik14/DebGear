@@ -1,0 +1,53 @@
+name: Build DebGear AppImage
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt update
+          sudo apt install -y python3 python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 wget fuse3
+
+      - name: Prepare AppDir
+        run: |
+          mkdir -p AppDir/usr/bin AppDir/usr/share/applications
+          cp debgear.py AppDir/usr/bin/debgear.py
+          printf "%s\n" "#!/bin/sh" "exec python3 /usr/bin/debgear.py \"\$@\"" > AppDir/usr/bin/debgear
+          chmod +x AppDir/usr/bin/debgear
+          printf "%s\n" "[Desktop Entry]" "Name=DebGear" "Comment=Debian hardware and driver management" "Exec=debgear" "Terminal=false" "Type=Application" "Categories=System;Settings;" > AppDir/usr/share/applications/debgear.desktop
+
+      - name: Download linuxdeploy
+        run: |
+          wget -O linuxdeploy.AppImage https://github.com/linuxdeploy/linuxdeploy/releases/latest/download/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy.AppImage
+
+      - name: Build AppImage
+        run: |
+          ./linuxdeploy.AppImage --appdir AppDir --desktop-file AppDir/usr/share/applications/debgear.desktop --output appimage
+
+      - name: Rename AppImage
+        run: |
+          mv DebGear*.AppImage DebGear-x86_64.AppImage
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: release
+          files: DebGear-x86_64.AppImage
+          overwrite_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
