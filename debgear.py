@@ -20,20 +20,20 @@ from gi.repository import Gtk, Adw, Gio, Gdk, GLib
 DRIVER_MAP = {
     "10de": {
         "pkg": "nvidia-driver",
-        "name": "NVIDIA Sahipli Sürücü",
-        "desc": "NVIDIA ekran kartları için kapalı kaynak sürücü."
+        "name": "NVIDIA Proprietary Driver",
+        "desc": "Closed-source driver for NVIDIA graphics hardware."
     },
 
     "8086": {
         "pkg": None,
-        "name": "Intel Açık Kaynak Sürücü",
-        "desc": "Intel grafik donanımı Linux kernel ve Mesa tarafından destekleniyor."
+        "name": "Intel Open Source Driver",
+        "desc": "Intel graphics hardware is supported by the Linux kernel and Mesa."
     },
 
     "1002": {
         "pkg": None,
-        "name": "AMD Açık Kaynak Sürücü",
-        "desc": "AMD grafik donanımı Linux kernel ve Mesa tarafından destekleniyor."
+        "name": "AMD Open Source Driver",
+        "desc": "AMD graphics hardware is supported by the Linux kernel and Mesa."
     }
 }
 
@@ -92,7 +92,7 @@ def command_output(command, env_extra=None):
 def version_compare(version_a, version_b):
 
     """
-    Debian sürüm karşılaştırması.
+    Debian version comparison.
 
     return:
        1  -> a > b
@@ -158,7 +158,7 @@ def get_installed_package_version(package):
 
         return (
             False,
-            "Kurulu değil"
+            "Not installed"
         )
 
     code, version = run_command([
@@ -172,7 +172,7 @@ def get_installed_package_version(package):
 
         return (
             True,
-            "Bilinmiyor"
+            "Unknown"
         )
 
     return (
@@ -188,9 +188,9 @@ def get_installed_package_version(package):
 def get_apt_candidate(package):
 
     """
-    apt-cache policy içindeki Candidate değerini alır.
+    Gets the Candidate version from apt-cache policy.
 
-    LC_ALL=C kullanıldığı için sistem dili önemli değildir.
+    LC_ALL=C is used so the system language does not matter.
     """
 
     code, output = run_command(
@@ -206,7 +206,7 @@ def get_apt_candidate(package):
     )
 
     if code != 0:
-        return "Bilinmiyor"
+        return "Unknown"
 
     for line in output.splitlines():
 
@@ -226,7 +226,7 @@ def get_apt_candidate(package):
 
                 return version
 
-    return "Bilinmiyor"
+    return "Unknown"
 
 
 # ============================================================
@@ -236,9 +236,9 @@ def get_apt_candidate(package):
 def get_apt_versions(package):
 
     """
-    apt-cache madison ile APT'nin bildiği tüm sürümleri toplar.
+    Collects all versions known by APT using apt-cache madison.
 
-    Örnek:
+    Example:
 
     nvidia-driver |
     550.163.01-4~bpo13+1 |
@@ -300,7 +300,7 @@ def get_newest_apt_version(package):
     )
 
     if not versions:
-        return "Bilinmiyor"
+        return "Unknown"
 
     newest = versions[0]
 
@@ -326,11 +326,12 @@ def get_version_source(
 ):
 
     """
-    Sürümün hangi APT deposundan geldiğini bulmaya çalışır.
+    Attempts to determine which APT repository
+    provides the specified version.
     """
 
     if not version:
-        return "Bilinmiyor"
+        return "Unknown"
 
     code, output = run_command(
         [
@@ -345,7 +346,7 @@ def get_version_source(
     )
 
     if code != 0:
-        return "Bilinmiyor"
+        return "Unknown"
 
     for line in output.splitlines():
 
@@ -377,9 +378,9 @@ def get_version_source(
         if "sid" in repo:
             return "Debian Sid"
 
-        return "APT Deposu"
+        return "APT Repository"
 
-    return "Bilinmiyor"
+    return "Unknown"
 
 
 # ============================================================
@@ -392,9 +393,9 @@ def get_pkg_info(package):
 
         return {
             "installed": True,
-            "installed_version": "Sistem tarafından sağlanıyor",
-            "candidate_version": "Sistem tarafından sağlanıyor",
-            "newest_version": "Sistem tarafından sağlanıyor",
+            "installed_version": "Provided by the system",
+            "candidate_version": "Provided by the system",
+            "newest_version": "Provided by the system",
             "source": "Kernel / Mesa"
         }
 
@@ -557,8 +558,8 @@ def get_nvidia_status():
     )
 
     # --------------------------------------------------------
-    # nvidia-smi en güvenilir kullanıcı alanı kontrolü.
-    # Çalışıyorsa NVIDIA sürücüsü aktif kabul edilir.
+    # NVIDIA-SMI is the most reliable user-space check.
+    # If it works, the NVIDIA driver is considered active.
     # --------------------------------------------------------
 
     if nvidia_smi:
@@ -601,8 +602,8 @@ def get_nvidia_status():
 
     if (
         package["installed"]
-        and newest != "Bilinmiyor"
-        and installed != "Bilinmiyor"
+        and newest != "Unknown"
+        and installed != "Unknown"
     ):
 
         has_update = version_is_newer(
@@ -699,14 +700,14 @@ def scan_hardware():
                 current = None
                 continue
 
-            # PCI class bilgisini temizle
+            # Clean PCI class information
             name = re.sub(
                 r"^[0-9a-fA-F:.]+\s+",
                 "",
                 line
             )
 
-            # [10de:xxxx] kısmını temizle
+            # Remove [vendor:device] part
             name = re.sub(
                 r"\s*\[[0-9a-fA-F]{4}:[0-9a-fA-F]{4}\]",
                 "",
@@ -784,21 +785,21 @@ def scan_hardware():
             ):
 
                 driver_name = (
-                    "Kernel Wi-Fi Sürücüsü"
+                    "Kernel Wi-Fi Driver"
                 )
 
             else:
 
                 driver_name = (
-                    "Kernel Ağ Sürücüsü"
+                    "Kernel Network Driver"
                 )
 
             info = {
                 "pkg": None,
                 "name": driver_name,
                 "desc": (
-                    "Ağ donanımı Linux kernel "
-                    "tarafından destekleniyor."
+                    "Network hardware is supported "
+                    "by the Linux kernel."
                 )
             }
 
@@ -812,10 +813,10 @@ def scan_hardware():
                 vendor,
                 {
                     "pkg": None,
-                    "name": "Kernel / Mesa Sürücüsü",
+                    "name": "Kernel / Mesa Driver",
                     "desc": (
-                        "Grafik donanımı Linux kernel "
-                        "ve Mesa tarafından destekleniyor."
+                        "Graphics hardware is supported "
+                        "by the Linux kernel and Mesa."
                     )
                 }
             )
@@ -834,7 +835,7 @@ def scan_hardware():
             "desc": info["desc"],
             "kernel": (
                 device["kernel"]
-                or "Yüklü değil"
+                or "Not loaded"
             ),
             **package_info
         })
@@ -1060,7 +1061,7 @@ class DriverWindow(
 
         title = Adw.WindowTitle(
             title="DebGear",
-            subtitle="Donanım ve sürücü yönetimi"
+            subtitle="Hardware and driver management"
         )
 
         header.set_title_widget(
@@ -1118,7 +1119,7 @@ class DriverWindow(
         )
 
         page_title = Gtk.Label(
-            label="Sistem Donanımları",
+            label="System Hardware",
             xalign=0
         )
 
@@ -1128,9 +1129,8 @@ class DriverWindow(
 
         page_description = Gtk.Label(
             label=(
-                "Sisteminizde algılanan grafik ve ağ "
-                "donanımlarını ve kullanılabilir sürücüleri "
-                "görüntüleyin."
+                "View detected graphics and network hardware "
+                "and available drivers."
             ),
             xalign=0,
             wrap=True
@@ -1153,7 +1153,7 @@ class DriverWindow(
         )
 
         self.device_count = Gtk.Label(
-            label="0 donanım"
+            label="0 devices"
         )
 
         self.device_count.add_css_class(
@@ -1177,7 +1177,7 @@ class DriverWindow(
         # ----------------------------------------------------
 
         section = Gtk.Label(
-            label="DONANIMLAR",
+            label="HARDWARE",
             xalign=0
         )
 
@@ -1216,7 +1216,7 @@ class DriverWindow(
         )
 
         self.bottom_status = Gtk.Label(
-            label="Sürücüler kontrol ediliyor...",
+            label="Checking drivers...",
             xalign=0,
             hexpand=True
         )
@@ -1230,7 +1230,7 @@ class DriverWindow(
         )
 
         self.apply_button = Gtk.Button(
-            label="Değişiklikleri Uygula"
+            label="Apply Changes"
         )
 
         self.apply_button.add_css_class(
@@ -1269,7 +1269,7 @@ class DriverWindow(
         self.switches.clear()
 
         self.device_count.set_text(
-            f"{len(self.devices)} donanım"
+            f"{len(self.devices)} devices"
         )
 
         while True:
@@ -1373,7 +1373,7 @@ class DriverWindow(
         )
 
         kernel = Gtk.Label(
-            label=f"Kernel sürücüsü: {device['kernel']}",
+            label=f"Kernel driver: {device['kernel']}",
             xalign=0
         )
 
@@ -1437,7 +1437,7 @@ class DriverWindow(
         )
 
         current_label = Gtk.Label(
-            label="Mevcut:"
+            label="Installed:"
         )
 
         current_label.add_css_class(
@@ -1455,7 +1455,7 @@ class DriverWindow(
         )
 
         candidate_label = Gtk.Label(
-            label="APT adayı:"
+            label="APT candidate:"
         )
 
         candidate_label.add_css_class(
@@ -1473,7 +1473,7 @@ class DriverWindow(
         )
 
         newest_label = Gtk.Label(
-            label="En yeni:"
+            label="Latest:"
         )
 
         newest_label.add_css_class(
@@ -1600,7 +1600,7 @@ class DriverWindow(
 
                 update_text = Gtk.Label(
                     label=(
-                        f"Yeni NVIDIA sürümü mevcut: "
+                        f"New NVIDIA driver available: "
                         f"{nvidia['newest_version']}"
                     ),
                     xalign=0,
@@ -1616,7 +1616,7 @@ class DriverWindow(
                 )
 
                 update_button = Gtk.Button(
-                    label="NVIDIA'yı Güncelle"
+                    label="Update NVIDIA"
                 )
 
                 update_button.add_css_class(
@@ -1659,8 +1659,8 @@ class DriverWindow(
 
                 description = Gtk.Label(
                     label=(
-                        "NVIDIA kernel modülüyle ilgili "
-                        "bir sorun tespit edildi."
+                        "A problem with the NVIDIA "
+                        "kernel module was detected."
                     ),
                     xalign=0,
                     hexpand=True
@@ -1675,7 +1675,7 @@ class DriverWindow(
                 )
 
                 repair_button = Gtk.Button(
-                    label="NVIDIA Sürücüsünü Onar"
+                    label="Repair NVIDIA Driver"
                 )
 
                 repair_button.add_css_class(
@@ -1707,7 +1707,7 @@ class DriverWindow(
             )
 
             package_label = Gtk.Label(
-                label="Paketi etkin",
+                label="Package enabled",
                 xalign=0,
                 hexpand=True
             )
@@ -1762,49 +1762,49 @@ class DriverWindow(
 
             if status == "active":
 
-                label = "✓ Sürücü aktif"
+                label = "✓ Driver active"
                 css = "status-ok"
 
             elif status == "kernel-active":
 
-                label = "⚠ Kernel sürücüsü aktif"
+                label = "⚠ Kernel driver active"
                 css = "status-warning"
 
             elif status == "nouveau":
 
-                label = "⚠ Nouveau aktif"
+                label = "⚠ Nouveau active"
                 css = "status-warning"
 
             elif status == "module-loaded":
 
-                label = "⚠ NVIDIA modülü yüklü"
+                label = "⚠ NVIDIA module loaded"
                 css = "status-warning"
 
             elif status == "installed-not-active":
 
-                label = "⚠ Sürücü aktif değil"
+                label = "⚠ Driver not active"
                 css = "status-warning"
 
             else:
 
-                label = "⚠ Sürücü kurulu değil"
+                label = "⚠ Driver not installed"
                 css = "status-error"
 
         elif device["pkg"]:
 
             if device["installed"]:
 
-                label = "✓ Paket kurulu"
+                label = "✓ Package installed"
                 css = "status-ok"
 
             else:
 
-                label = "⚠ Paket kurulu değil"
+                label = "⚠ Package not installed"
                 css = "status-warning"
 
         else:
 
-            label = "✓ Sistem sürücüsü"
+            label = "✓ System driver"
             css = "status-ok"
 
         status_label = Gtk.Label(
@@ -1836,7 +1836,7 @@ class DriverWindow(
         if not nvidia_exists:
 
             self.bottom_status.set_text(
-                "Sistem sürücüleri çalışır durumda."
+                "System drivers are working properly."
             )
 
             return
@@ -1848,43 +1848,43 @@ class DriverWindow(
             if nvidia["has_update"]:
 
                 self.bottom_status.set_text(
-                    "NVIDIA aktif. Yeni sürücü sürümü mevcut."
+                    "NVIDIA is active. A new driver version is available."
                 )
 
             else:
 
                 self.bottom_status.set_text(
-                    "NVIDIA sürücüsü aktif ve güncel."
+                    "NVIDIA driver is active and up to date."
                 )
 
         elif nvidia["status"] == "kernel-active":
 
             self.bottom_status.set_text(
-                "NVIDIA kernel sürücüsü aktif fakat NVIDIA-SMI çalışmıyor."
+                "NVIDIA kernel driver is active, but NVIDIA-SMI is not working."
             )
 
         elif nvidia["status"] == "nouveau":
 
             self.bottom_status.set_text(
-                "Nouveau aktif; NVIDIA sürücüsü kullanılmıyor."
+                "Nouveau is active; the NVIDIA driver is not being used."
             )
 
         elif nvidia["status"] == "module-loaded":
 
             self.bottom_status.set_text(
-                "NVIDIA kernel modülü yüklü fakat sürücü bağlantısı kontrol edilmeli."
+                "NVIDIA kernel module is loaded, but the driver connection should be checked."
             )
 
         elif nvidia["status"] == "installed-not-active":
 
             self.bottom_status.set_text(
-                "NVIDIA paketi kurulu fakat kernel sürücüsü aktif değil."
+                "NVIDIA package is installed, but the kernel driver is not active."
             )
 
         else:
 
             self.bottom_status.set_text(
-                "NVIDIA sürücüsü kurulu değil."
+                "NVIDIA driver is not installed."
             )
 
     # ========================================================
@@ -1937,8 +1937,8 @@ class DriverWindow(
         if not changes:
 
             self.show_dialog(
-                "Değişiklik yok",
-                "Uygulanacak herhangi bir paket değişikliği bulunmuyor."
+                "No Changes",
+                "There are no package changes to apply."
             )
 
             return
@@ -1948,7 +1948,7 @@ class DriverWindow(
         )
 
         self.bottom_status.set_text(
-            "Paket değişiklikleri uygulanıyor..."
+            "Applying package changes..."
         )
 
         thread = threading.Thread(
@@ -2029,25 +2029,25 @@ class DriverWindow(
 
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="NVIDIA sürücüsü güncellensin mi?",
+            heading="Update NVIDIA Driver?",
             body=(
-                f"Kurulu sürüm:\n"
+                f"Installed version:\n"
                 f"{nvidia['installed_version']}\n\n"
-                f"Yeni sürüm:\n"
+                f"New version:\n"
                 f"{newest}\n\n"
-                f"APT bu sürümü yapılandırılmış depolardan "
-                f"kurmayı deneyecek."
+                f"APT will attempt to install this version "
+                f"from the configured repositories."
             )
         )
 
         dialog.add_response(
             "cancel",
-            "İptal"
+            "Cancel"
         )
 
         dialog.add_response(
             "update",
-            "Güncelle"
+            "Update"
         )
 
         dialog.set_default_response(
@@ -2081,7 +2081,7 @@ class DriverWindow(
         )
 
         self.bottom_status.set_text(
-            "NVIDIA sürücüsü güncelleniyor..."
+            "Updating NVIDIA driver..."
         )
 
         thread = threading.Thread(
@@ -2130,23 +2130,22 @@ class DriverWindow(
 
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="NVIDIA sürücüsü onarılsın mı?",
+            heading="Repair NVIDIA Driver?",
             body=(
-                "APT güncellenecek, DKMS ve kernel header "
-                "paketleri kontrol edilecek. NVIDIA kernel "
-                "modülü yeniden oluşturulacak ve yüklenmeye "
-                "çalışılacak."
+                "APT will be updated, DKMS and kernel headers "
+                "will be checked. The NVIDIA kernel module will "
+                "be rebuilt and an attempt will be made to load it."
             )
         )
 
         dialog.add_response(
             "cancel",
-            "İptal"
+            "Cancel"
         )
 
         dialog.add_response(
             "repair",
-            "Onar"
+            "Repair"
         )
 
         dialog.set_default_response(
@@ -2178,7 +2177,7 @@ class DriverWindow(
         )
 
         self.bottom_status.set_text(
-            "NVIDIA sürücüsü onarılıyor..."
+            "Repairing NVIDIA driver..."
         )
 
         thread = threading.Thread(
@@ -2198,7 +2197,7 @@ class DriverWindow(
 set -e
 
 echo "========================================"
-echo " NVIDIA SÜRÜCÜ ONARIMI"
+echo " NVIDIA DRIVER REPAIR"
 echo "========================================"
 
 echo
@@ -2227,7 +2226,7 @@ nvidia-smi
 
 echo
 echo "========================================"
-echo " NVIDIA SÜRÜCÜSÜ BAŞARIYLA AKTİF"
+echo " NVIDIA DRIVER SUCCESSFULLY ACTIVATED"
 echo "========================================"
 """
 
@@ -2278,20 +2277,20 @@ echo "========================================"
         if success:
 
             self.bottom_status.set_text(
-                "İşlem başarıyla tamamlandı."
+                "Operation completed successfully."
             )
 
             self.refresh_devices()
 
             self.show_dialog(
-                "İşlem tamamlandı",
-                "Sürücü işlemi başarıyla tamamlandı."
+                "Operation Complete",
+                "The driver operation completed successfully."
             )
 
         else:
 
             self.bottom_status.set_text(
-                "İşlem sırasında hata oluştu."
+                "An error occurred during the operation."
             )
 
             if len(output) > 6000:
@@ -2299,8 +2298,8 @@ echo "========================================"
                 output = output[-6000:]
 
             self.show_dialog(
-                "İşlem başarısız",
-                "Komut çıktısı:\n\n" + output
+                "Operation Failed",
+                "Command output:\n\n" + output
             )
 
         return False
@@ -2323,7 +2322,7 @@ echo "========================================"
 
         dialog.add_response(
             "ok",
-            "Tamam"
+            "OK"
         )
 
         dialog.set_default_response(
