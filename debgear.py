@@ -1271,432 +1271,335 @@ class DriverWindow(
     # APPLY
     # ========================================================
 
-    def on_apply(
-        self,
-        button
-    ):
+    def update_action_state(self, *_args):
+        pending = sum(
+            toggle.get_active() != self.original_state.get(package, False)
+            for package, toggle in self.switches.items()
+        )
+        self.apply_button.set_label(
+            f"Review {pending} change{'s' if pending != 1 else ''}"
+            if pending else "No pending changes"
+        )
+        self.apply_button.set_sensitive(bool(pending) and not self.busy)
 
-        # fix: aggregate by package name, since several devices
-        # (device_id keys) can point at the same package.
-        wanted_state = {}
-
-        for device_id, (package, switch) in self.switches.items():
-
-            wanted_state[package] = switch.get_active()
-
-        changes = []
-
-        for package, active in wanted_state.items():
-
-            installed, _ = (
-                get_installed_package_version(
-                    package
-                )
-            )
-
-            if (
-                active
-                and not installed
-            ):
-
-                changes.append(
-                    (
-                        "install",
-                        package
-                    )
-                )
-
-            elif (
-                not active
-                and installed
-            ):
-
-                changes.append(
-                    (
-                        "remove",
-                        package
-                    )
-                )
-
-        if not changes:
-
-            self.show_dialog(
-                "No Changes",
-                "There are no package changes to apply."
-            )
-
+    def on_apply(self, _button):
+        if self.busy:
             return
-
-        self.set_busy(
-            True
+        changes = [
+            ("install" if toggle.get_active() else "remove", package)
+            for package, toggle in self.switches.items()
+            if toggle.get_active() != self.original_state.get(package, False)
+        ]
+        if not changes:
+            return
+        descriptions = "\n".join(
+            f"• {action.capitalize()} {package}"
+            for action, package in changes
         )
-
-        self.bottom_status.set_text(
-            "Applying package changes..."
+        removing = any(action == "remove" for action, _ in changes)
+        extra = (
+            "\n\nRemoving a graphics driver may leave you without a "
+            "working graphical session. APT's planned removals will "
+            "be checked before proceeding."
+            if removing else ""
         )
+        dialog = Adw.MessageDialog(
+            transient_for=self,
+            heading="Review driver changes",
+            body=descriptions + extra,
+        )
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("apply", "Apply changes")
+        dialog.set_default_response("cancel")
+        if removing:
+            dialog.set_response_appearance(
+                "apply", Adw.ResponseAppearance.DESTRUCTIVE
+            )
+        dialog.connect(
+            "response",
+            lambda _dialog, response: (
+                self._start_package_changes(changes)
+                if response == "apply" else None
+            ),
+        )
+        dialog.present()
 
-        thread = threading.Thread(
+    def _start_package_changes(self, changes):
+        if self.busy:
+            return
+        self.set_busy(True)
+        self.bottom_status.set_text("Checking APT's planned changes…")
+        threading.Thread(
             target=self.execute_package_changes,
             args=(changes,),
-            daemon=True
-        )
+            daemon=True,
+        ).start()
 
-        thread.start()
-
-    # ========================================================
-    # PACKAGE CHANGES
-    # ========================================================
-
-    def execute_package_changes(
-        self,
-        changes
-    ):
-
+    def execute_package_changes(self, changes):
         logs = []
-        success = True
-
-        for action, package in changes:
-
-            if action == "install":
-
+        try:
+            for action, package in changes:
+                # Recheck actual package state since the previous scan.
+                installed, _ = get_installed_package_version(package)
+                if installed == (action == "install"):
+                    continue
+                base = ["/usr/bin/apt-get"]
+                if action == "install":
+                    command = ["--no-remove", "install", package]
+                else:
+                    command = ["remove", package]
+                code, plan = run_command(
+                    base + ["-s"] + command, timeout=120
+                )
+                logs.append(f"=== Planned: {action} {package} ===\n{plan}")
+                if code != 0:
+                    raise RuntimeError("APT simulation failed; no change was made.")
+                if action == "remove":
+                    removals = [
+                        line.split()[1].split(":")[0]
+                        for line in plan.splitlines()
+                        if line.startswith("Remv ") and len(line.split()) >= 2
+                    ]
+                    extra = sorted(set(removals) - {package})
+                    if extra:
+                        raise RuntimeError(
+                            "Removal blocked: APT would also remove "
+                            + ", ".join(extra)
+                            + ". Review these dependencies manually."
+                        )
+                self._report_operation(f"{action.capitalize()}ing {package}…")
                 command = [
-                    "pkexec",
-                    "apt-get",
-                    "install",
-                    "-y",
-                    package
+                    "pkexec", "/usr/bin/apt-get", "-y"
+                ] + (["--no-remove"] if action == "install" else []) + [
+                    action, package
                 ]
-
-            else:
-
-                command = [
-                    "pkexec",
-                    "apt-get",
-                    "remove",
-                    "-y",
-                    package
-                ]
-
-            code, output = run_command(
-                command
+                code, output = run_command(command, timeout=None)
+                logs.append(output)
+                if code != 0:
+                    raise RuntimeError(
+                        f"APT exited with status {code} for {package}."
+                    )
+        except Exception as exc:
+            logs.append(str(exc))
+            GLib.idle_add(
+                self.operation_finished, False, "\n\n".join(logs)
             )
-
-            logs.append(
-                output
-            )
-
-            if code != 0:
-
-                success = False
-                break
-
+            return
         GLib.idle_add(
-            self.operation_finished,
-            success,
-            "\n\n".join(logs)
+            self.operation_finished, True, "\n\n".join(logs)
         )
+
+    def _report_operation(self, message):
+        GLib.idle_add(self.bottom_status.set_text, message)
 
     # ========================================================
     # NVIDIA UPDATE
     # ========================================================
 
-    def on_nvidia_update(
-        self,
-        button
-    ):
-
-        if not self.nvidia_status:
+    def on_nvidia_update(self, _button):
+        if self.busy or not self.nvidia_status:
             return
-
         nvidia = self.nvidia_status
-
-        newest = nvidia[
-            "newest_version"
-        ]
-
+        if not nvidia["has_update"]:
+            return
+        candidate = nvidia["candidate_version"]
+        newest = nvidia["newest_version"]
+        backports_note = (
+            f"\n\nThe newest version seen in your sources is {newest}, "
+            "but APT does not select it by default. DebGear will not "
+            "silently change repository priorities."
+            if newest != candidate else ""
+        )
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="Update NVIDIA Driver?",
+            heading="Install the NVIDIA APT candidate?",
             body=(
-                f"Installed version:\n"
-                f"{nvidia['installed_version']}\n\n"
-                f"New version:\n"
-                f"{newest}\n\n"
-                f"APT will attempt to install this version "
-                f"from the configured repositories."
-            )
+                f"Installed: {nvidia['installed_version']}\n"
+                f"APT candidate: {candidate}\n\n"
+                "APT will simulate the upgrade and refuse unexpected "
+                "package removals before requesting administrator access."
+                + backports_note
+                + "\n\nA reboot may be required to load the new module."
+            ),
         )
-
-        dialog.add_response(
-            "cancel",
-            "Cancel"
-        )
-
-        dialog.add_response(
-            "update",
-            "Update"
-        )
-
-        dialog.set_default_response(
-            "update"
-        )
-
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("update", "Install update")
+        dialog.set_default_response("cancel")
         dialog.connect(
             "response",
             self.nvidia_update_response,
-            newest
+            candidate,
         )
-
         dialog.present()
 
-    # ========================================================
-    # NVIDIA UPDATE RESPONSE
-    # ========================================================
-
-    def nvidia_update_response(
-        self,
-        dialog,
-        response,
-        version
-    ):
-
-        if response != "update":
+    def nvidia_update_response(self, _dialog, response, version):
+        if response != "update" or self.busy:
             return
-
-        self.set_busy(
-            True
-        )
-
-        self.bottom_status.set_text(
-            "Updating NVIDIA driver..."
-        )
-
-        thread = threading.Thread(
+        self.set_busy(True)
+        self.bottom_status.set_text("Checking NVIDIA upgrade plan…")
+        threading.Thread(
             target=self.execute_nvidia_update,
             args=(version,),
-            daemon=True
-        )
+            daemon=True,
+        ).start()
 
-        thread.start()
-
-    # ========================================================
-    # NVIDIA UPDATE
-    # ========================================================
-
-    def execute_nvidia_update(
-        self,
-        version
-    ):
-
+    def execute_nvidia_update(self, version):
+        current = get_apt_candidate("nvidia-driver")
+        if current != version:
+            GLib.idle_add(
+                self.operation_finished, False,
+                f"APT candidate changed from {version} to {current}. Refresh first.",
+            )
+            return
         command = [
-            "pkexec",
-            "apt-get",
-            "install",
-            "-y",
-            f"nvidia-driver={version}"
+            "/usr/bin/apt-get", "-s", "--no-remove", "install", "nvidia-driver"
         ]
-
-        code, output = run_command(
-            command
-        )
-
+        code, plan = run_command(command, timeout=120)
+        if code:
+            GLib.idle_add(
+                self.operation_finished, False,
+                f"APT simulation failed:\n{plan}",
+            )
+            return
+        self._report_operation("Installing NVIDIA candidate…")
+        code, output = run_command([
+            "pkexec", "/usr/bin/apt-get", "-y", "--no-remove",
+            "install", "nvidia-driver"
+        ], timeout=None)
         GLib.idle_add(
-            self.operation_finished,
-            code == 0,
-            output
+            self.operation_finished, code == 0,
+            plan + "\n\n" + output,
         )
 
     # ========================================================
     # NVIDIA REPAIR
     # ========================================================
 
-    def on_nvidia_repair(
-        self,
-        button
-    ):
-
+    def on_nvidia_repair(self, _button):
+        if self.busy or not self.nvidia_status:
+            return
+        nvidia = self.nvidia_status
+        if not nvidia["installed"]:
+            self.show_dialog(
+                "Driver not installed",
+                "Install the NVIDIA package before attempting a DKMS rebuild.",
+            )
+            return
+        if nvidia["status"] == "nouveau":
+            self.show_dialog(
+                "Nouveau is in use",
+                "The Nouveau module currently owns the GPU. Do not forcibly "
+                "unload it from a running graphical session. Reboot after "
+                "configuring NVIDIA, then inspect the driver state again.",
+            )
+            return
+        warning = (
+            "\n\nSecure Boot is enabled: an unsigned module may be "
+            "rejected. DKMS rebuilding does not enroll a signing key."
+            if "enabled" in nvidia["secure_boot"].lower() else ""
+        )
         dialog = Adw.MessageDialog(
             transient_for=self,
-            heading="Repair NVIDIA Driver?",
+            heading="Rebuild NVIDIA for this kernel?",
             body=(
-                "APT will be updated, DKMS and kernel headers "
-                "will be checked. The NVIDIA kernel module will "
-                "be rebuilt and an attempt will be made to load it."
-            )
+                f"Kernel: {nvidia['kernel_release']}\n"
+                f"Matching headers installed: "
+                f"{'yes' if nvidia['headers_installed'] else 'no'}\n\n"
+                "Install the matching headers and DKMS if available, rebuild "
+                "for the running kernel, then attempt to load NVIDIA. "
+                "This does not change kernels or repository priorities."
+                + warning
+            ),
         )
-
-        dialog.add_response(
-            "cancel",
-            "Cancel"
-        )
-
-        dialog.add_response(
-            "repair",
-            "Repair"
-        )
-
-        dialog.set_default_response(
-            "repair"
-        )
-
-        dialog.connect(
-            "response",
-            self.nvidia_repair_response
-        )
-
+        dialog.add_response("cancel", "Cancel")
+        dialog.add_response("repair", "Rebuild module")
+        dialog.set_default_response("cancel")
+        dialog.connect("response", self.nvidia_repair_response)
         dialog.present()
 
-    # ========================================================
-    # NVIDIA REPAIR RESPONSE
-    # ========================================================
-
-    def nvidia_repair_response(
-        self,
-        dialog,
-        response
-    ):
-
-        if response != "repair":
+    def nvidia_repair_response(self, _dialog, response):
+        if response != "repair" or self.busy:
             return
-
-        self.set_busy(
-            True
-        )
-
-        self.bottom_status.set_text(
-            "Repairing NVIDIA driver..."
-        )
-
-        thread = threading.Thread(
-            target=self.execute_nvidia_repair,
-            daemon=True
-        )
-
-        thread.start()
-
-    # ========================================================
-    # NVIDIA REPAIR
-    # ========================================================
+        self.set_busy(True)
+        self.bottom_status.set_text("Preparing the NVIDIA DKMS rebuild…")
+        threading.Thread(
+            target=self.execute_nvidia_repair, daemon=True
+        ).start()
 
     def execute_nvidia_repair(self):
+        kernel = os.uname().release
+        headers = f"linux-headers-{kernel}"
+        installed, _ = get_installed_package_version(headers)
+        if not installed and get_apt_candidate(headers) == "Unknown":
+            GLib.idle_add(
+                self.operation_finished, False,
+                f"No installable matching headers for {kernel}. "
+                "Select a kernel with available headers or configure "
+                "the correct Debian repositories before rebuilding.",
+            )
+            return
 
+        # Static command, no untrusted shell interpolation. Never unload
+        # Nouveau or force-load a module while it owns the display.
         repair_script = r"""
-set -e
-
-echo "========================================"
-echo " NVIDIA DRIVER REPAIR"
-echo "========================================"
-
-echo
-echo "=== APT UPDATE ==="
-apt-get update
-
-echo
-echo "=== DKMS / KERNEL HEADERS ==="
-apt-get install -y dkms linux-headers-$(uname -r)
-
-echo
-echo "=== DKMS AUTOINSTALL ==="
-dkms autoinstall
-
-echo
-echo "=== DEPMOD ==="
-depmod -a
-
-echo
-echo "=== NVIDIA MODULE ==="
+set -eu
+echo "=== Matching headers and DKMS ==="
+apt-get -y --no-remove install dkms "linux-headers-$(uname -r)"
+echo "=== Build modules for the running kernel ==="
+dkms autoinstall -k "$(uname -r)"
+echo "=== Refresh module dependencies ==="
+depmod -a "$(uname -r)"
+echo "=== Check GPU ownership ==="
+if lspci -nnk | grep -A 3 -i 'NVIDIA' | grep -q 'Kernel driver in use: nouveau'; then
+    echo 'Nouveau owns the GPU. A reboot or manual driver selection is needed.'
+    exit 1
+fi
+echo "=== Load NVIDIA ==="
 modprobe nvidia
-
-echo
-echo "=== NVIDIA-SMI ==="
+echo "=== Verify NVIDIA userspace ==="
 nvidia-smi
-
-echo
-echo "========================================"
-echo " NVIDIA DRIVER SUCCESSFULLY ACTIVATED"
-echo "========================================"
 """
-
-        command = [
-            "pkexec",
-            "bash",
-            "-c",
-            repair_script
-        ]
-
         code, output = run_command(
-            command
+            ["pkexec", "/bin/bash", "-c", repair_script],
+            timeout=None,
         )
-
-        GLib.idle_add(
-            self.operation_finished,
-            code == 0,
-            output
-        )
+        GLib.idle_add(self.operation_finished, code == 0, output)
 
     # ========================================================
     # BUSY (fix: now disables every tracked action button, not
     # just "Apply Changes" — prevents overlapping pkexec calls)
     # ========================================================
 
-    def set_busy(
-        self,
-        busy
-    ):
-
+    def set_busy(self, busy):
         self.busy = busy
-
         for button in self.action_buttons:
+            button.set_sensitive(not busy)
+        for toggle in self.switches.values():
+            toggle.set_sensitive(not busy)
+        self.update_action_state()
 
-            button.set_sensitive(
-                not busy
-            )
-
-    # ========================================================
-    # OPERATION FINISHED
-    # ========================================================
-
-    def operation_finished(
-        self,
-        success,
-        output
-    ):
-
+    def operation_finished(self, success, output):
+        # Refresh even after partial failure: one or more packages may have
+        # changed before a later command failed.
+        self.bottom_status.set_text(
+            "APT operation finished; checking driver state…"
+            if success else "Operation failed; refreshing package state…"
+        )
+        self.start_refresh(force=True)
         if success:
-
-            self.bottom_status.set_text(
-                "Operation completed successfully."
-            )
-
-            # start_refresh() calls set_busy(True) itself and the
-            # background scan will call set_busy(False) when done,
-            # so we don't clear busy here first.
-            self.start_refresh()
-
             self.show_dialog(
-                "Operation Complete",
-                "The driver operation completed successfully."
+                "Operation finished",
+                "APT completed the requested steps. DebGear is scanning "
+                "the live kernel driver now. A reboot may still be required.",
             )
-
         else:
-
-            self.set_busy(
-                False
-            )
-
-            self.bottom_status.set_text(
-                "An error occurred during the operation."
-            )
-
-            if len(output) > 6000:
-
-                output = output[-6000:]
-
+            if len(output) > 9000:
+                output = output[-9000:]
             self.show_dialog(
-                "Operation Failed",
-                "Command output:\n\n" + output
+                "Operation failed",
+                "The operation did not complete. Details:\n\n"
+                + (output or "No command output was returned."),
             )
-
         return False
 
     # ========================================================
