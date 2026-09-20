@@ -1,0 +1,59 @@
+name: DebGear CI and Debian package
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install build requirements
+        run: |
+          apt-get update
+          apt-get install -y python3 dpkg-dev desktop-file-utils bash
+      - name: Syntax and regression tests
+        run: |
+          python3 -m py_compile debgear.py tests/test_core.py
+          python3 -m unittest discover -s tests -v
+          bash -n packaging/build-deb.sh
+          desktop-file-validate data/com.mozcelik.DebGear.desktop
+      - name: Build Debian package
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="0.2.0+git${GITHUB_SHA:0:7}"
+          fi
+          bash packaging/build-deb.sh "$VERSION"
+          dpkg-deb --info dist/*.deb
+          dpkg-deb --contents dist/*.deb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: debgear-debian-package
+          path: dist/*.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: debgear-debian-package
+          path: dist
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+          generate_release_notes: true
