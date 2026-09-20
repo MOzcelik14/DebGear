@@ -6,6 +6,7 @@ import sys
 import re
 import threading
 import os
+import shutil
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
@@ -42,101 +43,56 @@ DRIVER_MAP = {
 # COMMAND HELPERS
 # ============================================================
 
-def run_command(command, env_extra=None):
-
+def run_command(command, env_extra=None, timeout=30):
+    """Execute an argv list without a shell; probes must not hang the UI forever."""
     env = os.environ.copy()
-
     if env_extra:
         env.update(env_extra)
-
     try:
-
         result = subprocess.run(
             command,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True,
-            env=env
+            errors="replace",
+            env=env,
+            timeout=timeout,
+            check=False,
         )
-
-        return (
-            result.returncode,
-            result.stdout.strip()
-        )
-
-    except Exception as exc:
-
-        return (
-            1,
-            str(exc)
-        )
+        return result.returncode, result.stdout.strip()
+    except subprocess.TimeoutExpired:
+        return 124, f"Command timed out: {command[0]}"
+    except (OSError, ValueError) as exc:
+        return 1, str(exc)
 
 
 def command_output(command, env_extra=None):
-
-    code, output = run_command(
-        command,
-        env_extra
-    )
-
-    if code == 0:
-        return output
-
-    return ""
-
+    code, output = run_command(command, env_extra)
+    return output if code == 0 else ""
 
 # ============================================================
 # VERSION COMPARISON
 # ============================================================
 
 def version_compare(version_a, version_b):
-
-    """
-    Debian version comparison.
-
-    return:
-       1  -> a > b
-       0  -> a == b
-      -1  -> a < b
-    """
-
+    """Compare Debian versions using dpkg; None means comparison unavailable."""
     if not version_a or not version_b:
+        return None
+    if version_a == version_b:
         return 0
-
-    code, _ = run_command([
-        "dpkg",
-        "--compare-versions",
-        version_a,
-        "gt",
-        version_b
-    ])
-
-    if code == 0:
-        return 1
-
-    code, _ = run_command([
-        "dpkg",
-        "--compare-versions",
-        version_a,
-        "lt",
-        version_b
-    ])
-
-    if code == 0:
-        return -1
-
-    return 0
+    for relation, result in (("gt", 1), ("lt", -1), ("eq", 0)):
+        code, _ = run_command(
+            ["dpkg", "--compare-versions", version_a, relation, version_b]
+        )
+        if code == 0:
+            return result
+        if code != 1:
+            return None
+    return None
 
 
 def version_is_newer(candidate, installed):
-
-    return (
-        version_compare(
-            candidate,
-            installed
-        ) > 0
-    )
-
+    return version_compare(candidate, installed) == 1
 
 # ============================================================
 # PACKAGE INSTALLED VERSION
@@ -309,7 +265,7 @@ def get_newest_apt_version(package):
         if version_compare(
             version,
             newest
-        ) > 0:
+        ) == 1:
 
             newest = version
 
@@ -320,68 +276,27 @@ def get_newest_apt_version(package):
 # DETECT VERSION SOURCE
 # ============================================================
 
-def get_version_source(
-    package,
-    version
-):
-
-    """
-    Attempts to determine which APT repository
-    provides the specified version.
-    """
-
-    if not version:
+def get_version_source(package, version):
+    """Return a descriptive source, without assuming the Debian codename."""
+    if not version or version == "Unknown":
         return "Unknown"
-
-    code, output = run_command(
-        [
-            "apt-cache",
-            "madison",
-            package
-        ],
-        {
-            "LC_ALL": "C",
-            "LANG": "C"
-        }
+    output = command_output(
+        ["apt-cache", "madison", package], {"LC_ALL": "C", "LANG": "C"}
     )
-
-    if code != 0:
-        return "Unknown"
-
+    sources = []
     for line in output.splitlines():
-
-        parts = [
-            x.strip()
-            for x in line.split("|")
-        ]
-
-        if len(parts) < 3:
-            continue
-
-        found_version = parts[1]
-        repository = parts[2]
-
-        if found_version != version:
-            continue
-
-        repo = repository.lower()
-
-        if "backports" in repo:
-            return "Backports"
-
-        if "trixie" in repo:
-            return "Debian Trixie"
-
-        if "testing" in repo:
-            return "Debian Testing"
-
-        if "sid" in repo:
-            return "Debian Sid"
-
-        return "APT Repository"
-
-    return "Unknown"
-
+        parts = [part.strip() for part in line.split("|")]
+        if len(parts) >= 3 and parts[1] == version:
+            sources.append(parts[2].lower())
+    if not sources:
+        return "Installed / local" if get_installed_package_version(package)[1] == version else "Unknown"
+    if any("backports" in source for source in sources):
+        return "Backports"
+    if any("unstable" in source or "/sid" in source for source in sources):
+        return "Debian Unstable"
+    if any("testing" in source for source in sources):
+        return "Debian Testing"
+    return "APT repository"
 
 # ============================================================
 # PACKAGE INFORMATION
@@ -547,94 +462,57 @@ def check_nvidia_smi():
 # through to whoever needs it.
 # ============================================================
 
-def get_nvidia_status():
-
-    package = get_pkg_info(
-        "nvidia-driver"
-    )
-
-    kernel_driver = (
-        get_nvidia_kernel_driver()
-    )
-
-    module_loaded = (
-        is_nvidia_module_loaded()
-    )
-
-    nvidia_smi, smi_output = (
-        check_nvidia_smi()
-    )
-
-    # --------------------------------------------------------
-    # NVIDIA-SMI is the most reliable user-space check.
-    # If it works, the NVIDIA driver is considered active.
-    # --------------------------------------------------------
-
+def get_nvidia_status(kernel_driver=None):
+    package = get_pkg_info("nvidia-driver")
+    if kernel_driver is None:
+        kernel_driver = get_nvidia_kernel_driver()
+    module_loaded = is_nvidia_module_loaded()
+    nvidia_smi, smi_output = check_nvidia_smi()
     if nvidia_smi:
-
         status = "active"
-
     elif kernel_driver == "nvidia":
-
         status = "kernel-active"
-
     elif kernel_driver == "nouveau":
-
         status = "nouveau"
-
     elif module_loaded:
-
         status = "module-loaded"
-
     elif package["installed"]:
-
         status = "installed-not-active"
-
     else:
-
         status = "not-installed"
 
-    # --------------------------------------------------------
-    # UPDATE STATUS
-    # --------------------------------------------------------
-
-    newest = package[
-        "newest_version"
-    ]
-
-    installed = package[
-        "installed_version"
-    ]
-
-    has_update = False
-
-    if (
+    # The highest version in any repository is NOT necessarily installable
+    # by a normal apt-get install. Only the APT candidate drives updates.
+    candidate = package["candidate_version"]
+    installed = package["installed_version"]
+    has_update = (
         package["installed"]
-        and newest != "Unknown"
+        and candidate != "Unknown"
         and installed != "Unknown"
-    ):
-
-        has_update = version_is_newer(
-            newest,
-            installed
-        )
+        and version_is_newer(candidate, installed)
+    )
+    secure_boot = command_output(["mokutil", "--sb-state"]) if shutil.which("mokutil") else ""
+    release = os.uname().release
+    headers_installed, _ = get_installed_package_version(f"linux-headers-{release}")
+    dkms_output = command_output(["dkms", "status", "-k", release]) if shutil.which("dkms") else ""
 
     return {
         "installed": package["installed"],
         "installed_version": installed,
-        "candidate_version": package[
-            "candidate_version"
-        ],
-        "newest_version": newest,
+        "candidate_version": candidate,
+        "newest_version": package["newest_version"],
         "source": package["source"],
         "kernel_driver": kernel_driver,
         "module_loaded": module_loaded,
         "nvidia_smi": nvidia_smi,
         "status": status,
         "has_update": has_update,
-        "smi_output": smi_output
+        "smi_output": smi_output,
+        "secure_boot": secure_boot,
+        "kernel_release": release,
+        "headers_installed": headers_installed,
+        "dkms_status": dkms_output,
     }
-
 
 # ============================================================
 # HARDWARE SCANNER
@@ -765,6 +643,8 @@ def scan_hardware():
 
     result = []
 
+    package_cache = {}
+
     for index, device in enumerate(devices):
 
         vendor = device[
@@ -829,9 +709,10 @@ def scan_hardware():
                 }
             )
 
-        package_info = get_pkg_info(
-            info["pkg"]
-        )
+        package = info["pkg"]
+        if package not in package_cache:
+            package_cache[package] = get_pkg_info(package)
+        package_info = package_cache[package]
 
         result.append({
             # NOTE (fix): a stable per-device id, independent of the
