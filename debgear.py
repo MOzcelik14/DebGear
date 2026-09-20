@@ -6,6 +6,11 @@ import sys
 import re
 import threading
 import os
+from debgear_diagnostics import (
+    operating_system, supports_driver_changes, detect_nvidia_package,
+    query_gpu, firmware_report, firmware_messages, kernel_report,
+    record_operation, read_history,
+)
 import shutil
 
 gi.require_version("Gtk", "4.0")
@@ -463,7 +468,8 @@ def check_nvidia_smi():
 # ============================================================
 
 def get_nvidia_status(kernel_driver=None):
-    package = get_pkg_info("nvidia-driver")
+    package_name = detect_nvidia_package() or "nvidia-driver"
+    package = get_pkg_info(package_name)
     if kernel_driver is None:
         kernel_driver = get_nvidia_kernel_driver()
     module_loaded = is_nvidia_module_loaded()
@@ -498,6 +504,7 @@ def get_nvidia_status(kernel_driver=None):
 
     return {
         "installed": package["installed"],
+        "package_name": package_name,
         "installed_version": installed,
         "candidate_version": candidate,
         "newest_version": package["newest_version"],
@@ -529,6 +536,7 @@ def scan_hardware():
         return []
 
     devices = []
+    detected_nvidia_package = detect_nvidia_package() or "nvidia-driver"
 
     current = None
 
@@ -611,7 +619,8 @@ def scan_hardware():
                     if is_gpu
                     else "network"
                 ),
-                "kernel": None
+                "kernel": None,
+                "modules": []
             }
 
             devices.append(
@@ -636,6 +645,11 @@ def scan_hardware():
                 current["kernel"] = (
                     match.group(1).strip()
                 )
+            modules = re.search(r"Kernel modules:\s*(.+)", line)
+            if modules:
+                current["modules"] = [
+                    item.strip() for item in modules.group(1).split(",")
+                ]
 
     # ========================================================
     # RESULT
@@ -709,7 +723,9 @@ def scan_hardware():
                 }
             )
 
-        package = info["pkg"]
+        package = (detected_nvidia_package
+                   if vendor == "10de" and device["type"] == "gpu"
+                   else info["pkg"])
         if package not in package_cache:
             package_cache[package] = get_pkg_info(package)
         package_info = package_cache[package]
@@ -734,6 +750,7 @@ def scan_hardware():
                 device["kernel"]
                 or "Not loaded"
             ),
+            "modules": device["modules"],
             **package_info
         })
 
@@ -780,6 +797,10 @@ class DriverWindow(
         # Cached result of the single get_nvidia_status() call
         # for the current refresh cycle.
         self.nvidia_status = None
+        self.os_info = operating_system()
+        self.supported_host = supports_driver_changes(self.os_info)
+        self.details = {}
+        self.current_action = "Driver operation"
 
         self.setup_css()
         self.build_ui()
