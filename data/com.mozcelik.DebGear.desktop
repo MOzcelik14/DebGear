@@ -1,11 +1,11 @@
 [Desktop Entry]
 Name=DebGear
 GenericName=Hardware and Driver Manager
-Comment=Inspect hardware and manage Debian drivers
+Comment=Inspect graphics, network, firmware and kernel drivers
 Exec=debgear
 Icon=com.mozcelik.DebGear
 Terminal=false
 Type=Application
 Categories=System;
-Keywords=Debian;NVIDIA;GPU;Drivers;DKMS;Hardware;
+Keywords=Debian;NVIDIA;GPU;Drivers;DKMS;Hardware;Firmware;Network;
 StartupNotify=true
