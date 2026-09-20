@@ -19,13 +19,20 @@ jobs:
       - name: Install build requirements
         run: |
           apt-get update
-          apt-get install -y python3 dpkg-dev desktop-file-utils bash
+          apt-get install -y python3 dpkg-dev desktop-file-utils bash \
+            python3-gi gir1.2-gtk-4.0 gir1.2-adw-1 libadwaita-1-0 \
+            xvfb xauth dbus-x11 adwaita-icon-theme
       - name: Syntax and regression tests
         run: |
-          python3 -m py_compile debgear.py debgear_diagnostics.py tests/test_core.py tests/test_diagnostics.py
+          python3 -m py_compile debgear.py debgear_diagnostics.py tests/test_core.py tests/test_diagnostics.py tests/ui_smoke.py
           python3 -m unittest discover -s tests -v
           bash -n packaging/build-deb.sh
           desktop-file-validate data/com.mozcelik.DebGear.desktop
+      - name: GTK window smoke test
+        env:
+          GSK_RENDERER: cairo
+        run: |
+          xvfb-run -a dbus-run-session -- python3 tests/ui_smoke.py
       - name: Build Debian package
         shell: bash
         run: |
@@ -37,6 +44,7 @@ jobs:
           bash packaging/build-deb.sh "$VERSION"
           dpkg-deb --info dist/*.deb
           dpkg-deb --contents dist/*.deb
+          dpkg-deb --contents dist/*.deb | grep 'debgear_diagnostics.py'
       - uses: actions/upload-artifact@v4
         with:
           name: debgear-debian-package
