@@ -17,7 +17,7 @@ repository.Adw = types.SimpleNamespace(
 )
 repository.Gio = types.SimpleNamespace()
 repository.Gdk = types.SimpleNamespace()
-repository.GLib = types.SimpleNamespace()
+repository.GLib = types.SimpleNamespace(idle_add=lambda callback, *args: callback(*args))
 gi.repository = repository
 sys.modules["gi"] = gi
 sys.modules["gi.repository"] = repository
