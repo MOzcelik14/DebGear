@@ -1506,6 +1506,13 @@ class DriverWindow(
         )
         kernel.add_css_class("kernel-text")
         name_box.append(kernel)
+        modules = ", ".join(device.get("modules", [])) or "Not reported"
+        alternatives = Gtk.Label(
+            label="Available kernel modules: " + modules,
+            xalign=0, wrap=True,
+        )
+        alternatives.add_css_class("kernel-text")
+        name_box.append(alternatives)
         top.append(name_box)
         status = self.create_status_widget(device, is_nvidia)
         status.set_valign(Gtk.Align.START)
@@ -1533,7 +1540,7 @@ class DriverWindow(
 
         # The same NVIDIA package controls every NVIDIA card: only one switch.
         package = device["pkg"]
-        if package and package not in self.switches:
+        if package and self.supported_host and package not in self.switches:
             card.append(Gtk.Separator())
             package_row = Gtk.Box(
                 orientation=Gtk.Orientation.HORIZONTAL, spacing=12
@@ -1560,7 +1567,15 @@ class DriverWindow(
             package_row.append(toggle)
             card.append(package_row)
 
-        if is_nvidia and self.nvidia_status and not self._nvidia_actions_added:
+        if is_nvidia and not self.supported_host:
+            card.append(self._notice(
+                "Read-only on " + self.os_info.get("PRETTY_NAME", "this distribution")
+                + ": use your distribution's driver manager for installation "
+                  "and repair."
+            ))
+
+        if (is_nvidia and self.supported_host and self.nvidia_status
+                and not self._nvidia_actions_added):
             self._nvidia_actions_added = True
             nvidia = self.nvidia_status
             note = None
@@ -1700,9 +1715,13 @@ class DriverWindow(
             f"Review {pending} change{'s' if pending != 1 else ''}"
             if pending else "No pending changes"
         )
-        self.apply_button.set_sensitive(bool(pending) and not self.busy)
+        self.apply_button.set_sensitive(
+            self.supported_host and bool(pending) and not self.busy
+        )
 
     def on_apply(self, _button):
+        if not self.supported_host:
+            return
         if self.busy:
             return
         changes = [
@@ -1745,6 +1764,11 @@ class DriverWindow(
         dialog.present()
 
     def _start_package_changes(self, changes):
+        if not self.supported_host:
+            return
+        self.current_action = "; ".join(
+            action + " " + package for action, package in changes
+        )
         if self.busy:
             return
         self.set_busy(True)
@@ -1817,6 +1841,8 @@ class DriverWindow(
     # ========================================================
 
     def on_nvidia_update(self, _button):
+        if not self.supported_host:
+            return
         if self.busy or not self.nvidia_status:
             return
         nvidia = self.nvidia_status
@@ -1853,7 +1879,10 @@ class DriverWindow(
         dialog.present()
 
     def nvidia_update_response(self, _dialog, response, version):
-        if response != "update" or self.busy:
+        if not self.supported_host or response != "update" or self.busy:
+            return
+        self.current_action = "Update NVIDIA to APT candidate " + version
+        if False:
             return
         self.set_busy(True)
         self.bottom_status.set_text("Checking NVIDIA upgrade plan…")
@@ -1896,6 +1925,8 @@ class DriverWindow(
     # ========================================================
 
     def on_nvidia_repair(self, _button):
+        if not self.supported_host:
+            return
         if self.busy or not self.nvidia_status:
             return
         nvidia = self.nvidia_status
@@ -1938,7 +1969,10 @@ class DriverWindow(
         dialog.present()
 
     def nvidia_repair_response(self, _dialog, response):
-        if response != "repair" or self.busy:
+        if not self.supported_host or response != "repair" or self.busy:
+            return
+        self.current_action = "Rebuild NVIDIA module for " + os.uname().release
+        if False:
             return
         self.set_busy(True)
         self.bottom_status.set_text("Preparing the NVIDIA DKMS rebuild…")
@@ -1999,6 +2033,7 @@ nvidia-smi
         self.update_action_state()
 
     def operation_finished(self, success, output):
+        record_operation(self.current_action, success)
         # Refresh even after partial failure: one or more packages may have
         # changed before a later command failed.
         self.bottom_status.set_text(
