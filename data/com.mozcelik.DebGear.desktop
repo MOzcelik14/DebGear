@@ -6,6 +6,6 @@ Exec=debgear
 Icon=com.mozcelik.DebGear
 Terminal=false
 Type=Application
-Categories=System;Settings;
+Categories=System;
 Keywords=Debian;NVIDIA;GPU;Drivers;DKMS;Hardware;
 StartupNotify=true
