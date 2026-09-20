@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-VERSION="${1:-0.2.0}"
+VERSION="${1:-0.3.0}"
 OUT="${2:-${ROOT}/dist}"
 
 if [[ ! "$VERSION" =~ ^[0-9][A-Za-z0-9.+:~\-]*$ ]]; then
@@ -15,6 +15,7 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$OUT"
 
 install -Dm755 "$ROOT/debgear.py" "$STAGE/usr/lib/debgear/debgear.py"
+install -Dm644 "$ROOT/debgear_diagnostics.py" "$STAGE/usr/lib/debgear/debgear_diagnostics.py"
 install -Dm644 "$ROOT/data/com.mozcelik.DebGear.desktop" "$STAGE/usr/share/applications/com.mozcelik.DebGear.desktop"
 install -Dm644 "$ROOT/data/com.mozcelik.DebGear.svg" "$STAGE/usr/share/icons/hicolor/scalable/apps/com.mozcelik.DebGear.svg"
 install -Dm644 "$ROOT/LICENSE" "$STAGE/usr/share/doc/debgear/copyright"
