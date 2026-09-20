@@ -1256,13 +1256,13 @@ class DriverWindow(
         if self.busy and not force:
             return
         self.set_busy(True)
-        self.bottom_status.set_text("Checking hardware and installed drivers…")
+        self.bottom_status.set_text("Scanning devices, drivers and firmware…")
         threading.Thread(target=self._scan_in_background, daemon=True).start()
 
     def _scan_in_background(self):
         try:
             if not shutil.which("lspci"):
-                raise RuntimeError("Hardware scan requires pciutils (lspci).")
+                raise RuntimeError("Install pciutils to scan PCI hardware (lspci).")
             devices = scan_hardware()
             nvidia_device = next(
                 (d for d in devices
@@ -1273,7 +1273,14 @@ class DriverWindow(
                 get_nvidia_status(nvidia_device["kernel"])
                 if nvidia_device else None
             )
-            GLib.idle_add(self._apply_refresh, devices, nvidia_status)
+            details = {
+                "gpu": query_gpu() if nvidia_device else {"available": False,
+                          "reason": "No NVIDIA GPU was detected"},
+                "firmware": firmware_report(),
+                "messages": firmware_messages(),
+                "kernel": kernel_report(),
+            }
+            GLib.idle_add(self._apply_refresh, devices, nvidia_status, details)
         except Exception as exc:
             GLib.idle_add(self._refresh_failed, str(exc))
 
@@ -1284,41 +1291,187 @@ class DriverWindow(
         self.show_dialog("Hardware Scan Failed", message)
         return False
 
-    def _apply_refresh(self, devices, nvidia_status):
+    def _apply_refresh(self, devices, nvidia_status, details):
         self.devices = devices
         self.nvidia_status = nvidia_status
+        self.details = details
         self.switches.clear()
         self.original_state.clear()
         self.device_card_map.clear()
         self._nvidia_actions_added = False
         self.action_buttons = [self.refresh_button, self.apply_button]
         self.device_count.set_text(f"{len(devices)} devices")
+        for box in (
+            self.overview_list, self.graphics_list, self.network_list,
+            self.gpu_metrics_box, self.firmware_list,
+            self.firmware_messages_box, self.kernel_list, self.history_list,
+        ):
+            self._clear(box)
 
-        while self.device_list.get_first_child():
-            self.device_list.remove(self.device_list.get_first_child())
-
-        if not devices:
-            empty = Gtk.Label(
-                label="No supported PCI graphics or network devices were detected.",
-                xalign=0, wrap=True,
+        graphics_count = sum(d["type"] == "gpu" for d in devices)
+        network_count = sum(d["type"] == "network" for d in devices)
+        active_count = sum(d["kernel"] != "Not loaded" for d in devices)
+        attention = len(devices) - active_count
+        if nvidia_status and nvidia_status["status"] in (
+            "installed-not-active", "kernel-active", "module-loaded"
+        ):
+            attention += 1
+        for key, value in (
+            ("devices", len(devices)), ("drivers", active_count),
+            ("attention", attention),
+        ):
+            self.metrics_labels[key].set_text(str(value))
+        self.hero_description.set_text(
+            self.os_info.get("PRETTY_NAME", "Linux")
+            + "  ·  Kernel " + details["kernel"]["release"]
+        )
+        status = (f"{graphics_count} graphics · {network_count} network adapters"
+                  if devices else "No supported PCI devices detected.")
+        if not self.supported_host:
+            status += (
+                "\nRead-only mode: package operations are disabled outside Debian."
             )
-            empty.set_margin_top(24)
-            self.device_list.append(empty)
+            self.host_badge.set_text(
+                self.os_info.get("PRETTY_NAME", "Linux") + "\nRead-only mode"
+            )
+        self.summary_label.set_text(status)
 
         for device in devices:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            row.add_css_class("device-card")
+            device_icon = Gtk.Image.new_from_icon_name(
+                "video-display-symbolic" if device["type"] == "gpu"
+                else "network-wireless-symbolic"
+            )
+            device_icon.set_pixel_size(21)
+            row.append(device_icon)
+            description = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            description.set_hexpand(True)
+            device_name = Gtk.Label(
+                label=device["name"], xalign=0, wrap=True
+            )
+            device_name.add_css_class("device-name")
+            description.append(device_name)
+            driver = Gtk.Label(
+                label="Kernel: " + device["kernel"], xalign=0, wrap=True
+            )
+            driver.add_css_class("subdued")
+            description.append(driver)
+            row.append(description)
+            row.append(self.create_status_widget(
+                device, device["vendor"] == "10de" and device["type"] == "gpu"
+            ))
+            self.overview_list.append(row)
+
             card = self.create_device_card(device)
             self.device_card_map.append((device, card))
-            self.device_list.append(card)
+            target = (self.graphics_list if device["type"] == "gpu"
+                      else self.network_list)
+            target.append(card)
 
-        self.on_search_changed()
+        if graphics_count == 0:
+            self.graphics_list.append(
+                self._notice("No PCI graphics devices detected.")
+            )
+        if network_count == 0:
+            self.network_list.append(
+                self._notice("No PCI network adapters detected.")
+            )
+        self.populate_diagnostics()
         self.update_global_status()
-        self.summary_label.set_text(
-            f"{sum(d['type'] == 'gpu' for d in devices)} graphics · "
-            f"{sum(d['type'] == 'network' for d in devices)} network devices"
-            if devices else "No matching hardware found"
-        )
         self.set_busy(False)
         return False
+
+    def populate_diagnostics(self):
+        gpu = self.details.get("gpu", {})
+        if gpu.get("available"):
+            for entry in gpu.get("devices", []):
+                self.gpu_metrics_box.append(self._info_card(
+                    entry.get("name", "NVIDIA GPU"), (
+                        ("Driver", entry.get("driver_version", "Not reported")),
+                        ("VRAM", entry.get("memory.total", "N/A") + " MiB"),
+                        ("Temperature", entry.get("temperature.gpu", "N/A") + " °C"),
+                        ("Utilization", entry.get("utilization.gpu", "N/A") + " %"),
+                        ("Power draw", entry.get("power.draw", "N/A") + " W"),
+                    ), accent=True,
+                ))
+        else:
+            self.gpu_metrics_box.append(self._notice(
+                "NVIDIA telemetry: " + gpu.get("reason", "Unavailable")
+            ))
+
+        firmware = self.details.get("firmware", {})
+        if firmware.get("state") == "ok":
+            found = firmware.get("devices", [])
+            if not found:
+                self.firmware_list.append(
+                    self._notice("fwupd found no supported firmware devices.")
+                )
+            for item in found:
+                self.firmware_list.append(self._info_card(
+                    item["name"], (
+                        ("Firmware version", item["version"]),
+                        ("Vendor", item["vendor"]),
+                    ),
+                ))
+        else:
+            self.firmware_list.append(self._notice(
+                firmware.get("message", "Firmware inventory unavailable.")
+            ))
+
+        messages = self.details.get("messages", {})
+        if messages.get("state") != "ok":
+            self.firmware_messages_box.append(self._notice(
+                messages.get("message", "Kernel messages unavailable.")
+            ))
+        elif not messages.get("messages"):
+            self.firmware_messages_box.append(self._notice(
+                "No matching firmware failures in the recent readable journal. "
+                "This does not prove all firmware is installed."
+            ))
+        else:
+            for item in messages["messages"]:
+                self.firmware_messages_box.append(self._notice(item))
+
+        kernel = self.details.get("kernel", {})
+        self.kernel_list.append(self._info_card(
+            "Running kernel", (
+                ("Release", kernel.get("release", "Unknown")),
+                ("Matching headers", (
+                    "Present" if kernel.get("headers") else "Not detected"
+                )),
+                ("Secure Boot", kernel.get("secure_boot", "Unknown")),
+            ),
+        ))
+        dkms = kernel.get("dkms", {})
+        self.kernel_list.append(self._info_card(
+            "DKMS for running kernel", (
+                ("Status", dkms.get("state", "Unknown")),
+                ("Details", dkms.get("text", "Unavailable")[:1200]),
+            ),
+        ))
+        if self.nvidia_status:
+            nvidia = self.nvidia_status
+            self.kernel_list.append(self._info_card(
+                "NVIDIA compatibility signals", (
+                    ("Package", nvidia["package_name"]),
+                    ("Kernel module", str(nvidia["kernel_driver"] or "Not bound")),
+                    ("NVIDIA-SMI", "Working" if nvidia["nvidia_smi"] else "Unavailable"),
+                    ("APT candidate", nvidia["candidate_version"]),
+                ), accent=True,
+            ))
+        history = read_history()
+        if not history:
+            self.history_list.append(self._notice(
+                "No driver operations recorded in this user account."
+            ))
+        for entry in history:
+            self.history_list.append(self._info_card(
+                entry.get("action", "Driver action"),
+                (("Time (UTC)", entry.get("when", "Unknown")),
+                 ("Result", "Completed" if entry.get("success") else "Failed")),
+            ))
+
 
     # ========================================================
     # DEVICE CARD
