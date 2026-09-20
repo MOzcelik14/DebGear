@@ -22,7 +22,7 @@ jobs:
           apt-get install -y python3 dpkg-dev desktop-file-utils bash
       - name: Syntax and regression tests
         run: |
-          python3 -m py_compile debgear.py tests/test_core.py
+          python3 -m py_compile debgear.py debgear_diagnostics.py tests/test_core.py tests/test_diagnostics.py
           python3 -m unittest discover -s tests -v
           bash -n packaging/build-deb.sh
           desktop-file-validate data/com.mozcelik.DebGear.desktop
@@ -32,7 +32,7 @@ jobs:
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
           else
-            VERSION="0.2.0+git${GITHUB_SHA:0:7}"
+            VERSION="0.3.0+git${GITHUB_SHA:0:7}"
           fi
           bash packaging/build-deb.sh "$VERSION"
           dpkg-deb --info dist/*.deb
