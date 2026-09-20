@@ -27,6 +27,7 @@ jobs:
           bash -n packaging/build-deb.sh
           desktop-file-validate data/com.mozcelik.DebGear.desktop
       - name: Build Debian package
+        shell: bash
         run: |
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             VERSION="${GITHUB_REF_NAME#v}"
