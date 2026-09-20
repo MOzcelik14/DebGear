@@ -6,6 +6,11 @@ import sys
 import re
 import threading
 import os
+from debgear_diagnostics import (
+    operating_system, supports_driver_changes, detect_nvidia_package,
+    query_gpu, firmware_report, firmware_messages, kernel_report,
+    record_operation, read_history,
+)
 import shutil
 
 gi.require_version("Gtk", "4.0")
@@ -463,7 +468,8 @@ def check_nvidia_smi():
 # ============================================================
 
 def get_nvidia_status(kernel_driver=None):
-    package = get_pkg_info("nvidia-driver")
+    package_name = detect_nvidia_package() or "nvidia-driver"
+    package = get_pkg_info(package_name)
     if kernel_driver is None:
         kernel_driver = get_nvidia_kernel_driver()
     module_loaded = is_nvidia_module_loaded()
@@ -498,6 +504,7 @@ def get_nvidia_status(kernel_driver=None):
 
     return {
         "installed": package["installed"],
+        "package_name": package_name,
         "installed_version": installed,
         "candidate_version": candidate,
         "newest_version": package["newest_version"],
@@ -529,6 +536,7 @@ def scan_hardware():
         return []
 
     devices = []
+    detected_nvidia_package = detect_nvidia_package() or "nvidia-driver"
 
     current = None
 
@@ -611,7 +619,8 @@ def scan_hardware():
                     if is_gpu
                     else "network"
                 ),
-                "kernel": None
+                "kernel": None,
+                "modules": []
             }
 
             devices.append(
@@ -636,6 +645,11 @@ def scan_hardware():
                 current["kernel"] = (
                     match.group(1).strip()
                 )
+            modules = re.search(r"Kernel modules:\s*(.+)", line)
+            if modules:
+                current["modules"] = [
+                    item.strip() for item in modules.group(1).split(",")
+                ]
 
     # ========================================================
     # RESULT
@@ -709,7 +723,9 @@ def scan_hardware():
                 }
             )
 
-        package = info["pkg"]
+        package = (detected_nvidia_package
+                   if vendor == "10de" and device["type"] == "gpu"
+                   else info["pkg"])
         if package not in package_cache:
             package_cache[package] = get_pkg_info(package)
         package_info = package_cache[package]
@@ -734,6 +750,7 @@ def scan_hardware():
                 device["kernel"]
                 or "Not loaded"
             ),
+            "modules": device["modules"],
             **package_info
         })
 
@@ -780,6 +797,10 @@ class DriverWindow(
         # Cached result of the single get_nvidia_status() call
         # for the current refresh cycle.
         self.nvidia_status = None
+        self.os_info = operating_system()
+        self.supported_host = supports_driver_changes(self.os_info)
+        self.details = {}
+        self.current_action = "Driver operation"
 
         self.setup_css()
         self.build_ui()
@@ -793,76 +814,114 @@ class DriverWindow(
         """Adaptive libadwaita styling: respect the system's light/dark preference."""
         provider = Gtk.CssProvider()
         provider.load_from_data(b"""
-            .debgear-content { padding: 26px 8px 32px; }
-            .hero {
-                padding: 24px;
-                border-radius: 18px;
-                background: alpha(@accent_bg_color, 0.09);
-                border: 1px solid alpha(@accent_bg_color, 0.20);
+            .driver-sidebar {
+                background: alpha(@window_fg_color, 0.025);
+                padding: 14px 10px;
             }
-            .hero-icon {
+            .sidebar-brand { padding: 14px 10px 22px; }
+            .brand-title { font-size: 12px; font-weight: 800; }
+            .brand-icon {
+                color: #92cf49;
+                background: alpha(#76b900, 0.16);
+                padding: 9px;
+                border-radius: 12px;
+            }
+            .host-badge {
+                color: alpha(@window_fg_color, 0.68);
+                padding: 12px;
+                border-radius: 11px;
+                background: alpha(@window_fg_color, 0.06);
+                font-size: 11px;
+            }
+            .nav-item {
+                padding: 10px;
+                border-radius: 10px;
+                background: transparent;
+                box-shadow: none;
+                font-weight: 600;
+            }
+            .nav-item:hover { background: alpha(@window_fg_color, 0.06); }
+            .nav-active {
+                background: alpha(@accent_bg_color, 0.18);
                 color: @accent_color;
-                background: alpha(@accent_bg_color, 0.14);
-                border-radius: 14px;
-                padding: 15px;
             }
-            .page-title { font-size: 26px; font-weight: 800; }
-            .page-description { color: alpha(@window_fg_color, 0.70); font-size: 13px; }
-            .section-label {
-                color: alpha(@window_fg_color, 0.67);
-                font-weight: bold;
+            .debgear-content { padding-bottom: 18px; }
+            .driver-hero {
+                padding: 25px;
+                border-radius: 18px;
+                background: linear-gradient(115deg,
+                    alpha(#76b900, 0.19), alpha(@accent_bg_color, 0.065));
+                border: 1px solid alpha(#76b900, 0.35);
+            }
+            .eyebrow {
+                color: @accent_color;
+                font-size: 11px;
+                font-weight: 800;
+                letter-spacing: 1px;
+            }
+            .page-title { font-size: 30px; font-weight: 800; }
+            .hero-description, .subdued {
+                color: alpha(@window_fg_color, 0.70);
                 font-size: 12px;
-                margin-top: 12px;
+            }
+            .section-heading { font-size: 19px; font-weight: 750; }
+            .metric-card {
+                padding: 17px;
+                border-radius: 14px;
+                background: @card_bg_color;
+                border: 1px solid alpha(@window_fg_color, 0.09);
+            }
+            .metric-value { font-size: 28px; font-weight: 800; }
+            .metric-icon { color: @accent_color; }
+            .notice-text {
+                padding: 13px 15px;
+                border-radius: 11px;
+                background: alpha(@accent_bg_color, 0.08);
+                color: @window_fg_color;
+                font-size: 12px;
             }
             .count-badge {
                 border-radius: 99px;
                 padding: 6px 12px;
-                background: alpha(@window_fg_color, 0.07);
-                font-weight: bold;
-                font-size: 12px;
+                background: alpha(@window_fg_color, 0.08);
             }
             .device-card {
-                padding: 20px;
-                border-radius: 16px;
+                padding: 19px;
+                border-radius: 15px;
                 background: @card_bg_color;
-                border: 1px solid alpha(@window_fg_color, 0.09);
+                border: 1px solid alpha(@window_fg_color, 0.10);
             }
-            .nvidia-card { border-color: alpha(#76b900, 0.48); }
+            .nvidia-card { border-color: alpha(#76b900, 0.49); }
             .device-icon {
-                border-radius: 12px;
                 padding: 12px;
-                background: alpha(@window_fg_color, 0.055);
+                border-radius: 12px;
+                background: alpha(@window_fg_color, 0.06);
             }
             .device-name { font-size: 15px; font-weight: bold; }
-            .driver-name { color: alpha(@window_fg_color, 0.68); font-size: 12px; }
-            .kernel-text { color: alpha(@window_fg_color, 0.65); font-size: 11px; }
-            .version-label { color: alpha(@window_fg_color, 0.60); font-size: 11px; }
-            .version-value { font-size: 12px; font-weight: bold; }
-            .status-ok, .status-warning, .status-error, .status-update {
+            .driver-name, .kernel-text, .version-label {
+                color: alpha(@window_fg_color, 0.70);
+                font-size: 12px;
+            }
+            .version-value { font-size: 12px; font-weight: 650; }
+            .status-ok, .status-warning, .status-error {
                 border-radius: 99px;
                 padding: 5px 10px;
                 font-size: 11px;
-                font-weight: bold;
+                font-weight: 700;
             }
-            .status-ok {
-                color: #207b4c; background: alpha(#2ec27e, 0.16);
-            }
-            .status-warning {
-                color: #9b6200; background: alpha(#f4b400, 0.17);
-            }
-            .status-error {
-                color: #b52b31; background: alpha(#ed333b, 0.13);
-            }
-            .status-update {
-                color: @accent_color; background: alpha(@accent_bg_color, 0.12);
-            }
+            .status-ok { color: #237b48; background: alpha(#2ec27e, 0.18); }
+            .status-warning { color: #986309; background: alpha(#f4b400, 0.19); }
+            .status-error { color: #ae3131; background: alpha(#ed333b, 0.15); }
             .bottom-bar {
-                padding: 12px 22px;
-                border-top: 1px solid alpha(@window_fg_color, 0.09);
                 background: @window_bg_color;
+                padding: 12px 20px;
+                border-top: 1px solid alpha(@window_fg_color, 0.09);
             }
-            .bottom-status { color: alpha(@window_fg_color, 0.72); font-size: 12px; }
-            .apply-button { min-height: 39px; min-width: 168px; }
+            .bottom-status {
+                color: alpha(@window_fg_color, 0.73);
+                font-size: 12px;
+            }
+            .apply-button { min-width: 170px; min-height: 40px; }
             .action-row { padding-top: 9px; }
         """)
         display = Gdk.Display.get_default()
@@ -877,85 +936,201 @@ class DriverWindow(
 
     def build_ui(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-
         header = Adw.HeaderBar()
         header.set_title_widget(Adw.WindowTitle(
-            title="DebGear", subtitle="Debian hardware & drivers"
+            title="DebGear", subtitle="Driver Center · 0.3"
         ))
         self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
-        self.refresh_button.set_tooltip_text("Rescan hardware and driver packages")
+        self.refresh_button.set_tooltip_text("Rescan drivers and firmware")
         self.refresh_button.connect("clicked", lambda *_: self.start_refresh())
         header.pack_end(self.refresh_button)
         self.action_buttons.append(self.refresh_button)
         root.append(header)
 
-        scroll = Gtk.ScrolledWindow(
-            vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
+        body = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
+        body.set_vexpand(True)
+        root.append(body)
+
+        sidebar = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        sidebar.set_size_request(198, -1)
+        sidebar.add_css_class("driver-sidebar")
+        brand = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=11)
+        brand.add_css_class("sidebar-brand")
+        icon = Gtk.Image.new_from_icon_name("applications-system-symbolic")
+        icon.set_pixel_size(28)
+        icon.add_css_class("brand-icon")
+        brand.append(icon)
+        brand_words = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        brand_title = Gtk.Label(label="DRIVER CENTER", xalign=0)
+        brand_title.add_css_class("brand-title")
+        brand_words.append(brand_title)
+        brand_sub = Gtk.Label(label="Debian hardware tools", xalign=0)
+        brand_sub.add_css_class("subdued")
+        brand_words.append(brand_sub)
+        brand.append(brand_words)
+        sidebar.append(brand)
+
+        self.nav_buttons = {}
+        for section, icon_name, title in (
+            ("overview", "view-dashboard-symbolic", "Overview"),
+            ("graphics", "video-display-symbolic", "Graphics & GPU"),
+            ("network", "network-wireless-symbolic", "Network"),
+            ("firmware", "drive-harddisk-symbolic", "Firmware"),
+            ("kernel", "utilities-system-monitor-symbolic", "Kernel & DKMS"),
+            ("activity", "document-open-recent-symbolic", "Activity"),
+        ):
+            nav = Gtk.Button()
+            nav.add_css_class("nav-item")
+            nav_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+            nav_icon = Gtk.Image.new_from_icon_name(icon_name)
+            nav_icon.set_pixel_size(18)
+            nav_row.append(nav_icon)
+            label = Gtk.Label(label=title, xalign=0, hexpand=True)
+            nav_row.append(label)
+            nav.set_child(nav_row)
+            nav.connect("clicked", self.select_page, section)
+            sidebar.append(nav)
+            self.nav_buttons[section] = nav
+        spacer = Gtk.Box(vexpand=True)
+        sidebar.append(spacer)
+        self.host_badge = Gtk.Label(
+            label=self.os_info.get("PRETTY_NAME", "Linux"), xalign=0, wrap=True
         )
-        clamp = Adw.Clamp()
-        clamp.set_maximum_size(1040)
-        clamp.set_tightening_threshold(680)
-        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
-        content.set_margin_start(20)
-        content.set_margin_end(20)
-        content.add_css_class("debgear-content")
-        clamp.set_child(content)
-        scroll.set_child(clamp)
-        root.append(scroll)
+        self.host_badge.add_css_class("host-badge")
+        sidebar.append(self.host_badge)
+        body.append(sidebar)
+        body.append(Gtk.Separator(orientation=Gtk.Orientation.VERTICAL))
 
-        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
-        hero.add_css_class("hero")
-        hero_icon = Gtk.Image.new_from_icon_name("computer-symbolic")
-        hero_icon.set_pixel_size(40)
-        hero_icon.set_valign(Gtk.Align.START)
-        hero_icon.add_css_class("hero-icon")
-        hero.append(hero_icon)
+        self.stack = Gtk.Stack()
+        self.stack.set_transition_type(Gtk.StackTransitionType.CROSSFADE)
+        self.stack.set_transition_duration(170)
+        self.stack.set_hexpand(True)
+        self.stack.set_vexpand(True)
+        body.append(self.stack)
 
-        intro_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
-        intro_text.set_hexpand(True)
-        title = Gtk.Label(label="Your hardware, at a glance", xalign=0, wrap=True)
-        title.add_css_class("page-title")
-        intro_text.append(title)
-        description = Gtk.Label(
-            label="Inspect kernel drivers, NVIDIA health and versions from your configured APT sources.",
+        overview = self.make_page()
+        self.stack.add_named(overview, "overview")
+        overview_hero = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+        overview_hero.add_css_class("driver-hero")
+        eyebrow = Gtk.Label(label="SYSTEM OVERVIEW", xalign=0)
+        eyebrow.add_css_class("eyebrow")
+        overview_hero.append(eyebrow)
+        hero_title = Gtk.Label(label="Your drivers. In control.", xalign=0, wrap=True)
+        hero_title.add_css_class("page-title")
+        overview_hero.append(hero_title)
+        self.hero_description = Gtk.Label(
+            label="Inspecting your devices and driver health…",
             xalign=0, wrap=True,
         )
-        description.add_css_class("page-description")
-        intro_text.append(description)
-        hero.append(intro_text)
-        content.append(hero)
+        self.hero_description.add_css_class("hero-description")
+        overview_hero.append(self.hero_description)
+        self.page_content["overview"].append(overview_hero)
 
-        summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        metrics = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
+        self.metrics_labels = {}
+        for key, title, icon_name in (
+            ("devices", "Devices", "computer-symbolic"),
+            ("drivers", "Kernel drivers", "emblem-ok-symbolic"),
+            ("attention", "Needs review", "dialog-warning-symbolic"),
+        ):
+            metric = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+            metric.add_css_class("metric-card")
+            metric.set_hexpand(True)
+            metric_icon = Gtk.Image.new_from_icon_name(icon_name)
+            metric_icon.set_halign(Gtk.Align.START)
+            metric_icon.add_css_class("metric-icon")
+            metric.append(metric_icon)
+            value = Gtk.Label(label="—", xalign=0)
+            value.add_css_class("metric-value")
+            metric.append(value)
+            caption = Gtk.Label(label=title, xalign=0, wrap=True)
+            caption.add_css_class("subdued")
+            metric.append(caption)
+            metrics.append(metric)
+            self.metrics_labels[key] = value
+        self.page_content["overview"].append(metrics)
+
         self.summary_label = Gtk.Label(
-            label="Scanning your system…", xalign=0, hexpand=True, wrap=True
+            label="Scanning your system…", xalign=0, wrap=True
         )
-        self.summary_label.add_css_class("page-description")
-        summary.append(self.summary_label)
+        self.summary_label.add_css_class("notice-text")
+        self.page_content["overview"].append(self.summary_label)
         self.device_count = Gtk.Label(label="0 devices")
         self.device_count.add_css_class("count-badge")
-        summary.append(self.device_count)
-        content.append(summary)
-
-        heading_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
-        heading = Gtk.Label(label="DETECTED DEVICES", xalign=0, hexpand=True)
-        heading.add_css_class("section-label")
-        heading_row.append(heading)
-        self.search_entry = Gtk.SearchEntry()
-        self.search_entry.set_placeholder_text("Filter devices…")
-        self.search_entry.set_width_chars(18)
-        self.search_entry.connect("search-changed", self.on_search_changed)
-        heading_row.append(self.search_entry)
-        content.append(heading_row)
-
-        self.device_list = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL, spacing=12
+        self.page_content["overview"].append(self.make_section(
+            "Detected hardware", "Device and driver status"
+        ))
+        self.overview_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10
         )
-        loading = Gtk.Label(label="Detecting PCI hardware and APT packages…")
-        loading.set_margin_top(28)
-        self.device_list.append(loading)
-        content.append(self.device_list)
+        self.page_content["overview"].append(self.overview_list)
 
-        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        graphics = self.make_page()
+        self.stack.add_named(graphics, "graphics")
+        self.page_content["graphics"].append(self.make_section(
+            "Graphics & GPU", "Manage installed graphics packages and inspect GPU health"
+        ))
+        self.gpu_metrics_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+        self.page_content["graphics"].append(self.gpu_metrics_box)
+        self.graphics_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.page_content["graphics"].append(self.graphics_list)
+
+        network = self.make_page()
+        self.stack.add_named(network, "network")
+        self.page_content["network"].append(self.make_section(
+            "Network & Wireless", "Adapters, available kernel modules and active bindings"
+        ))
+        self.network_list = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
+        self.page_content["network"].append(self.network_list)
+
+        firmware = self.make_page()
+        self.stack.add_named(firmware, "firmware")
+        self.page_content["firmware"].append(self.make_section(
+            "Firmware", "Read-only fwupd inventory and recent kernel firmware messages"
+        ))
+        self.firmware_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10
+        )
+        self.page_content["firmware"].append(self.firmware_list)
+        self.page_content["firmware"].append(self.make_section(
+            "Kernel firmware messages", "Recent messages are not a complete system audit"
+        ))
+        self.firmware_messages_box = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8
+        )
+        self.page_content["firmware"].append(self.firmware_messages_box)
+
+        kernel_page = self.make_page()
+        self.stack.add_named(kernel_page, "kernel")
+        self.page_content["kernel"].append(self.make_section(
+            "Kernel & DKMS", "Compatibility signals for the currently running kernel"
+        ))
+        self.kernel_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=10
+        )
+        self.page_content["kernel"].append(self.kernel_list)
+
+        activity = self.make_page()
+        self.stack.add_named(activity, "activity")
+        self.page_content["activity"].append(self.make_section(
+            "Activity & diagnostics", "Local driver action history without privileged logs"
+        ))
+        note = Gtk.Label(
+            label="History stores only action names, timestamps and results.",
+            xalign=0, wrap=True,
+        )
+        note.add_css_class("subdued")
+        self.page_content["activity"].append(note)
+        copy_button = Gtk.Button(label="Copy diagnostic summary")
+        copy_button.set_halign(Gtk.Align.START)
+        copy_button.connect("clicked", self.copy_diagnostics)
+        self.page_content["activity"].append(copy_button)
+        self.history_list = Gtk.Box(
+            orientation=Gtk.Orientation.VERTICAL, spacing=8
+        )
+        self.page_content["activity"].append(self.history_list)
+
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         bottom.add_css_class("bottom-bar")
         self.bottom_status = Gtk.Label(
             label="Checking drivers…", xalign=0, hexpand=True, wrap=True
@@ -971,15 +1146,104 @@ class DriverWindow(
         bottom.append(self.apply_button)
         root.append(bottom)
         self.set_content(root)
+        self.select_page(None, "overview")
 
-    def on_search_changed(self, *_args):
-        query = self.search_entry.get_text().strip().casefold()
-        for device, card in self.device_card_map:
-            haystack = " ".join(
-                str(device.get(key, ""))
-                for key in ("name", "driver_name", "kernel", "vendor", "device")
-            ).casefold()
-            card.set_visible(query in haystack)
+    def make_page(self):
+        if not hasattr(self, "page_content"):
+            self.page_content = {}
+        scroll = Gtk.ScrolledWindow(
+            hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True
+        )
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(1020)
+        clamp.set_tightening_threshold(680)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=17)
+        content.set_margin_top(28)
+        content.set_margin_bottom(36)
+        content.set_margin_start(24)
+        content.set_margin_end(24)
+        content.add_css_class("debgear-content")
+        clamp.set_child(content)
+        scroll.set_child(clamp)
+        keys = ("overview", "graphics", "network", "firmware", "kernel", "activity")
+        self.page_content[keys[len(self.page_content)]] = content
+        return scroll
+
+    def make_section(self, title, subtitle):
+        group = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+        name = Gtk.Label(label=title, xalign=0, wrap=True)
+        name.add_css_class("section-heading")
+        group.append(name)
+        secondary = Gtk.Label(label=subtitle, xalign=0, wrap=True)
+        secondary.add_css_class("subdued")
+        group.append(secondary)
+        return group
+
+    def select_page(self, _button, section):
+        self.stack.set_visible_child_name(section)
+        for name, button in self.nav_buttons.items():
+            if name == section:
+                button.add_css_class("nav-active")
+            else:
+                button.remove_css_class("nav-active")
+        self.apply_button.set_visible(section == "graphics")
+
+    def _clear(self, box):
+        while box.get_first_child():
+            box.remove(box.get_first_child())
+
+    def _notice(self, text, css="notice-text"):
+        label = Gtk.Label(label=text, xalign=0, wrap=True, selectable=True)
+        label.add_css_class(css)
+        return label
+
+    def _info_card(self, title, lines, accent=False):
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=9)
+        card.add_css_class("device-card")
+        if accent:
+            card.add_css_class("nvidia-card")
+        title_label = Gtk.Label(label=title, xalign=0, wrap=True)
+        title_label.add_css_class("device-name")
+        card.append(title_label)
+        for caption, value in lines:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+            label = Gtk.Label(label=caption, xalign=0, hexpand=True, wrap=True)
+            label.add_css_class("subdued")
+            row.append(label)
+            detail = Gtk.Label(label=str(value), xalign=1, wrap=True, selectable=True)
+            detail.add_css_class("version-value")
+            row.append(detail)
+            card.append(row)
+        return card
+
+    def copy_diagnostics(self, _button):
+        lines = [
+            "DebGear driver diagnostics",
+            "Operating system: " + self.os_info.get("PRETTY_NAME", "Unknown"),
+            "Read-only host: " + ("no" if self.supported_host else "yes"),
+        ]
+        for device in self.devices:
+            lines.append(
+                device["name"] + " | bound: " + device["kernel"]
+                + " | available: " + ", ".join(device.get("modules", []))
+            )
+        if self.nvidia_status:
+            lines.extend([
+                "NVIDIA package: " + self.nvidia_status["package_name"],
+                "NVIDIA state: " + self.nvidia_status["status"],
+                "Installed: " + self.nvidia_status["installed_version"],
+                "APT candidate: " + self.nvidia_status["candidate_version"],
+            ])
+        info = self.details.get("kernel", {})
+        lines.extend([
+            "Kernel: " + info.get("release", "Unknown"),
+            "Matching headers: " + str(info.get("headers", "Unknown")),
+        ])
+        display = Gdk.Display.get_default()
+        if display:
+            display.get_clipboard().set("\n".join(lines))
+            self.bottom_status.set_text("Diagnostic summary copied to clipboard.")
+
 
     # ========================================================
     # REFRESH (fix: scanning now happens off the GTK thread)
@@ -989,13 +1253,13 @@ class DriverWindow(
         if self.busy and not force:
             return
         self.set_busy(True)
-        self.bottom_status.set_text("Checking hardware and installed drivers…")
+        self.bottom_status.set_text("Scanning devices, drivers and firmware…")
         threading.Thread(target=self._scan_in_background, daemon=True).start()
 
     def _scan_in_background(self):
         try:
             if not shutil.which("lspci"):
-                raise RuntimeError("Hardware scan requires pciutils (lspci).")
+                raise RuntimeError("Install pciutils to scan PCI hardware (lspci).")
             devices = scan_hardware()
             nvidia_device = next(
                 (d for d in devices
@@ -1006,7 +1270,14 @@ class DriverWindow(
                 get_nvidia_status(nvidia_device["kernel"])
                 if nvidia_device else None
             )
-            GLib.idle_add(self._apply_refresh, devices, nvidia_status)
+            details = {
+                "gpu": query_gpu() if nvidia_device else {"available": False,
+                          "reason": "No NVIDIA GPU was detected"},
+                "firmware": firmware_report(),
+                "messages": firmware_messages(),
+                "kernel": kernel_report(),
+            }
+            GLib.idle_add(self._apply_refresh, devices, nvidia_status, details)
         except Exception as exc:
             GLib.idle_add(self._refresh_failed, str(exc))
 
@@ -1017,41 +1288,187 @@ class DriverWindow(
         self.show_dialog("Hardware Scan Failed", message)
         return False
 
-    def _apply_refresh(self, devices, nvidia_status):
+    def _apply_refresh(self, devices, nvidia_status, details):
         self.devices = devices
         self.nvidia_status = nvidia_status
+        self.details = details
         self.switches.clear()
         self.original_state.clear()
         self.device_card_map.clear()
         self._nvidia_actions_added = False
         self.action_buttons = [self.refresh_button, self.apply_button]
         self.device_count.set_text(f"{len(devices)} devices")
+        for box in (
+            self.overview_list, self.graphics_list, self.network_list,
+            self.gpu_metrics_box, self.firmware_list,
+            self.firmware_messages_box, self.kernel_list, self.history_list,
+        ):
+            self._clear(box)
 
-        while self.device_list.get_first_child():
-            self.device_list.remove(self.device_list.get_first_child())
-
-        if not devices:
-            empty = Gtk.Label(
-                label="No supported PCI graphics or network devices were detected.",
-                xalign=0, wrap=True,
+        graphics_count = sum(d["type"] == "gpu" for d in devices)
+        network_count = sum(d["type"] == "network" for d in devices)
+        active_count = sum(d["kernel"] != "Not loaded" for d in devices)
+        attention = len(devices) - active_count
+        if nvidia_status and nvidia_status["status"] in (
+            "installed-not-active", "kernel-active", "module-loaded"
+        ):
+            attention += 1
+        for key, value in (
+            ("devices", len(devices)), ("drivers", active_count),
+            ("attention", attention),
+        ):
+            self.metrics_labels[key].set_text(str(value))
+        self.hero_description.set_text(
+            self.os_info.get("PRETTY_NAME", "Linux")
+            + "  ·  Kernel " + details["kernel"]["release"]
+        )
+        status = (f"{graphics_count} graphics · {network_count} network adapters"
+                  if devices else "No supported PCI devices detected.")
+        if not self.supported_host:
+            status += (
+                "\nRead-only mode: package operations are disabled outside Debian."
             )
-            empty.set_margin_top(24)
-            self.device_list.append(empty)
+            self.host_badge.set_text(
+                self.os_info.get("PRETTY_NAME", "Linux") + "\nRead-only mode"
+            )
+        self.summary_label.set_text(status)
 
         for device in devices:
+            row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+            row.add_css_class("device-card")
+            device_icon = Gtk.Image.new_from_icon_name(
+                "video-display-symbolic" if device["type"] == "gpu"
+                else "network-wireless-symbolic"
+            )
+            device_icon.set_pixel_size(21)
+            row.append(device_icon)
+            description = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            description.set_hexpand(True)
+            device_name = Gtk.Label(
+                label=device["name"], xalign=0, wrap=True
+            )
+            device_name.add_css_class("device-name")
+            description.append(device_name)
+            driver = Gtk.Label(
+                label="Kernel: " + device["kernel"], xalign=0, wrap=True
+            )
+            driver.add_css_class("subdued")
+            description.append(driver)
+            row.append(description)
+            row.append(self.create_status_widget(
+                device, device["vendor"] == "10de" and device["type"] == "gpu"
+            ))
+            self.overview_list.append(row)
+
             card = self.create_device_card(device)
             self.device_card_map.append((device, card))
-            self.device_list.append(card)
+            target = (self.graphics_list if device["type"] == "gpu"
+                      else self.network_list)
+            target.append(card)
 
-        self.on_search_changed()
+        if graphics_count == 0:
+            self.graphics_list.append(
+                self._notice("No PCI graphics devices detected.")
+            )
+        if network_count == 0:
+            self.network_list.append(
+                self._notice("No PCI network adapters detected.")
+            )
+        self.populate_diagnostics()
         self.update_global_status()
-        self.summary_label.set_text(
-            f"{sum(d['type'] == 'gpu' for d in devices)} graphics · "
-            f"{sum(d['type'] == 'network' for d in devices)} network devices"
-            if devices else "No matching hardware found"
-        )
         self.set_busy(False)
         return False
+
+    def populate_diagnostics(self):
+        gpu = self.details.get("gpu", {})
+        if gpu.get("available"):
+            for entry in gpu.get("devices", []):
+                self.gpu_metrics_box.append(self._info_card(
+                    entry.get("name", "NVIDIA GPU"), (
+                        ("Driver", entry.get("driver_version", "Not reported")),
+                        ("VRAM", entry.get("memory.total", "N/A") + " MiB"),
+                        ("Temperature", entry.get("temperature.gpu", "N/A") + " °C"),
+                        ("Utilization", entry.get("utilization.gpu", "N/A") + " %"),
+                        ("Power draw", entry.get("power.draw", "N/A") + " W"),
+                    ), accent=True,
+                ))
+        else:
+            self.gpu_metrics_box.append(self._notice(
+                "NVIDIA telemetry: " + gpu.get("reason", "Unavailable")
+            ))
+
+        firmware = self.details.get("firmware", {})
+        if firmware.get("state") == "ok":
+            found = firmware.get("devices", [])
+            if not found:
+                self.firmware_list.append(
+                    self._notice("fwupd found no supported firmware devices.")
+                )
+            for item in found:
+                self.firmware_list.append(self._info_card(
+                    item["name"], (
+                        ("Firmware version", item["version"]),
+                        ("Vendor", item["vendor"]),
+                    ),
+                ))
+        else:
+            self.firmware_list.append(self._notice(
+                firmware.get("message", "Firmware inventory unavailable.")
+            ))
+
+        messages = self.details.get("messages", {})
+        if messages.get("state") != "ok":
+            self.firmware_messages_box.append(self._notice(
+                messages.get("message", "Kernel messages unavailable.")
+            ))
+        elif not messages.get("messages"):
+            self.firmware_messages_box.append(self._notice(
+                "No matching firmware failures in the recent readable journal. "
+                "This does not prove all firmware is installed."
+            ))
+        else:
+            for item in messages["messages"]:
+                self.firmware_messages_box.append(self._notice(item))
+
+        kernel = self.details.get("kernel", {})
+        self.kernel_list.append(self._info_card(
+            "Running kernel", (
+                ("Release", kernel.get("release", "Unknown")),
+                ("Matching headers", (
+                    "Present" if kernel.get("headers") else "Not detected"
+                )),
+                ("Secure Boot", kernel.get("secure_boot", "Unknown")),
+            ),
+        ))
+        dkms = kernel.get("dkms", {})
+        self.kernel_list.append(self._info_card(
+            "DKMS for running kernel", (
+                ("Status", dkms.get("state", "Unknown")),
+                ("Details", dkms.get("text", "Unavailable")[:1200]),
+            ),
+        ))
+        if self.nvidia_status:
+            nvidia = self.nvidia_status
+            self.kernel_list.append(self._info_card(
+                "NVIDIA compatibility signals", (
+                    ("Package", nvidia["package_name"]),
+                    ("Kernel module", str(nvidia["kernel_driver"] or "Not bound")),
+                    ("NVIDIA-SMI", "Working" if nvidia["nvidia_smi"] else "Unavailable"),
+                    ("APT candidate", nvidia["candidate_version"]),
+                ), accent=True,
+            ))
+        history = read_history()
+        if not history:
+            self.history_list.append(self._notice(
+                "No driver operations recorded in this user account."
+            ))
+        for entry in history:
+            self.history_list.append(self._info_card(
+                entry.get("action", "Driver action"),
+                (("Time (UTC)", entry.get("when", "Unknown")),
+                 ("Result", "Completed" if entry.get("success") else "Failed")),
+            ))
+
 
     # ========================================================
     # DEVICE CARD
@@ -1086,6 +1503,13 @@ class DriverWindow(
         )
         kernel.add_css_class("kernel-text")
         name_box.append(kernel)
+        modules = ", ".join(device.get("modules", [])) or "Not reported"
+        alternatives = Gtk.Label(
+            label="Available kernel modules: " + modules,
+            xalign=0, wrap=True,
+        )
+        alternatives.add_css_class("kernel-text")
+        name_box.append(alternatives)
         top.append(name_box)
         status = self.create_status_widget(device, is_nvidia)
         status.set_valign(Gtk.Align.START)
@@ -1113,7 +1537,7 @@ class DriverWindow(
 
         # The same NVIDIA package controls every NVIDIA card: only one switch.
         package = device["pkg"]
-        if package and package not in self.switches:
+        if package and self.supported_host and package not in self.switches:
             card.append(Gtk.Separator())
             package_row = Gtk.Box(
                 orientation=Gtk.Orientation.HORIZONTAL, spacing=12
@@ -1140,7 +1564,15 @@ class DriverWindow(
             package_row.append(toggle)
             card.append(package_row)
 
-        if is_nvidia and self.nvidia_status and not self._nvidia_actions_added:
+        if is_nvidia and not self.supported_host:
+            card.append(self._notice(
+                "Read-only on " + self.os_info.get("PRETTY_NAME", "this distribution")
+                + ": use your distribution's driver manager for installation "
+                  "and repair."
+            ))
+
+        if (is_nvidia and self.supported_host and self.nvidia_status
+                and not self._nvidia_actions_added):
             self._nvidia_actions_added = True
             nvidia = self.nvidia_status
             note = None
@@ -1280,9 +1712,13 @@ class DriverWindow(
             f"Review {pending} change{'s' if pending != 1 else ''}"
             if pending else "No pending changes"
         )
-        self.apply_button.set_sensitive(bool(pending) and not self.busy)
+        self.apply_button.set_sensitive(
+            self.supported_host and bool(pending) and not self.busy
+        )
 
     def on_apply(self, _button):
+        if not self.supported_host:
+            return
         if self.busy:
             return
         changes = [
@@ -1325,6 +1761,11 @@ class DriverWindow(
         dialog.present()
 
     def _start_package_changes(self, changes):
+        if not self.supported_host:
+            return
+        self.current_action = "; ".join(
+            action + " " + package for action, package in changes
+        )
         if self.busy:
             return
         self.set_busy(True)
@@ -1397,6 +1838,8 @@ class DriverWindow(
     # ========================================================
 
     def on_nvidia_update(self, _button):
+        if not self.supported_host:
+            return
         if self.busy or not self.nvidia_status:
             return
         nvidia = self.nvidia_status
@@ -1433,8 +1876,9 @@ class DriverWindow(
         dialog.present()
 
     def nvidia_update_response(self, _dialog, response, version):
-        if response != "update" or self.busy:
+        if not self.supported_host or response != "update" or self.busy:
             return
+        self.current_action = "Update NVIDIA to APT candidate " + version
         self.set_busy(True)
         self.bottom_status.set_text("Checking NVIDIA upgrade plan…")
         threading.Thread(
@@ -1476,6 +1920,8 @@ class DriverWindow(
     # ========================================================
 
     def on_nvidia_repair(self, _button):
+        if not self.supported_host:
+            return
         if self.busy or not self.nvidia_status:
             return
         nvidia = self.nvidia_status
@@ -1518,8 +1964,9 @@ class DriverWindow(
         dialog.present()
 
     def nvidia_repair_response(self, _dialog, response):
-        if response != "repair" or self.busy:
+        if not self.supported_host or response != "repair" or self.busy:
             return
+        self.current_action = "Rebuild NVIDIA module for " + os.uname().release
         self.set_busy(True)
         self.bottom_status.set_text("Preparing the NVIDIA DKMS rebuild…")
         threading.Thread(
@@ -1579,6 +2026,7 @@ nvidia-smi
         self.update_action_state()
 
     def operation_finished(self, success, output):
+        record_operation(self.current_action, success)
         # Refresh even after partial failure: one or more packages may have
         # changed before a later command failed.
         self.bottom_status.set_text(
