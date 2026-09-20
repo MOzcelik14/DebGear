@@ -758,15 +758,15 @@ class DriverWindow(
             "DebGear"
         )
 
-        self.set_default_size(
-            900,
-            720
-        )
+        self.set_default_size(960, 740)
+        self.set_size_request(640, 520)
 
         self.devices = []
         # switches keyed by device_id (see scan_hardware note),
         # value is (package_name, Gtk.Switch)
         self.switches = {}
+        self.original_state = {}
+        self.device_card_map = []
 
         # NOTE (fix): every button that triggers a privileged
         # pkexec operation lives in this list so set_busy() can
@@ -790,169 +790,85 @@ class DriverWindow(
     # ========================================================
 
     def setup_css(self):
-
+        """Adaptive libadwaita styling: respect the system's light/dark preference."""
         provider = Gtk.CssProvider()
-
-        provider.load_from_data(
-            b"""
-            window {
-                background: #17171c;
+        provider.load_from_data(b"""
+            .debgear-content { padding: 26px 8px 32px; }
+            .hero {
+                padding: 24px;
+                border-radius: 18px;
+                background: alpha(@accent_bg_color, 0.09);
+                border: 1px solid alpha(@accent_bg_color, 0.20);
             }
-
-            .content {
-                background: #17171c;
+            .hero-icon {
+                color: @accent_color;
+                background: alpha(@accent_bg_color, 0.14);
+                border-radius: 14px;
+                padding: 15px;
             }
-
-            .page-title {
-                font-size: 25px;
-                font-weight: 700;
-            }
-
-            .page-description {
-                color: alpha(white, 0.58);
-                font-size: 13px;
-            }
-
-            .count-badge {
-                background: alpha(white, 0.08);
-                color: alpha(white, 0.62);
-                border-radius: 999px;
-                padding: 5px 10px;
-                font-size: 11px;
-            }
-
+            .page-title { font-size: 26px; font-weight: 800; }
+            .page-description { color: alpha(@window_fg_color, 0.70); font-size: 13px; }
             .section-label {
-                color: alpha(white, 0.48);
-                font-size: 11px;
-                font-weight: 700;
-                letter-spacing: 1px;
+                color: alpha(@window_fg_color, 0.67);
+                font-weight: bold;
+                font-size: 12px;
+                margin-top: 12px;
             }
-
+            .count-badge {
+                border-radius: 99px;
+                padding: 6px 12px;
+                background: alpha(@window_fg_color, 0.07);
+                font-weight: bold;
+                font-size: 12px;
+            }
             .device-card {
-                background: #202027;
-                border: 1px solid alpha(white, 0.055);
-                border-radius: 13px;
-                padding: 16px;
+                padding: 20px;
+                border-radius: 16px;
+                background: @card_bg_color;
+                border: 1px solid alpha(@window_fg_color, 0.09);
             }
-
-            .device-card:hover {
-                background: #24242c;
-                border-color: alpha(white, 0.09);
+            .nvidia-card { border-color: alpha(#76b900, 0.48); }
+            .device-icon {
+                border-radius: 12px;
+                padding: 12px;
+                background: alpha(@window_fg_color, 0.055);
             }
-
-            .nvidia-card {
-                background: #1d2922;
-                border-color: alpha(#76b900, 0.28);
-            }
-
-            .device-name {
-                font-size: 14px;
-                font-weight: 650;
-            }
-
-            .driver-name {
-                color: alpha(white, 0.60);
-                font-size: 12px;
-            }
-
-            .kernel-text {
-                color: alpha(white, 0.43);
+            .device-name { font-size: 15px; font-weight: bold; }
+            .driver-name { color: alpha(@window_fg_color, 0.68); font-size: 12px; }
+            .kernel-text { color: alpha(@window_fg_color, 0.65); font-size: 11px; }
+            .version-label { color: alpha(@window_fg_color, 0.60); font-size: 11px; }
+            .version-value { font-size: 12px; font-weight: bold; }
+            .status-ok, .status-warning, .status-error, .status-update {
+                border-radius: 99px;
+                padding: 5px 10px;
                 font-size: 11px;
+                font-weight: bold;
             }
-
             .status-ok {
-                background: alpha(#2ec27e, 0.13);
-                color: #5be39b;
-                border: 1px solid alpha(#2ec27e, 0.25);
-                border-radius: 999px;
-                padding: 5px 10px;
-                font-size: 11px;
-                font-weight: 650;
+                color: #207b4c; background: alpha(#2ec27e, 0.16);
             }
-
             .status-warning {
-                background: alpha(#f9c74f, 0.13);
-                color: #ffd866;
-                border: 1px solid alpha(#f9c74f, 0.24);
-                border-radius: 999px;
-                padding: 5px 10px;
-                font-size: 11px;
-                font-weight: 650;
+                color: #9b6200; background: alpha(#f4b400, 0.17);
             }
-
             .status-error {
-                background: alpha(#ff453a, 0.13);
-                color: #ff756e;
-                border: 1px solid alpha(#ff453a, 0.24);
-                border-radius: 999px;
-                padding: 5px 10px;
-                font-size: 11px;
-                font-weight: 650;
+                color: #b52b31; background: alpha(#ed333b, 0.13);
             }
-
             .status-update {
-                background: alpha(#58a6ff, 0.13);
-                color: #72b8ff;
-                border: 1px solid alpha(#58a6ff, 0.25);
-                border-radius: 999px;
-                padding: 5px 10px;
-                font-size: 11px;
-                font-weight: 650;
+                color: @accent_color; background: alpha(@accent_bg_color, 0.12);
             }
-
-            .version-label {
-                color: alpha(white, 0.42);
-                font-size: 11px;
-            }
-
-            .version-value {
-                font-size: 12px;
-                font-weight: 600;
-            }
-
-            .source-label {
-                color: alpha(white, 0.38);
-                font-size: 10px;
-            }
-
-            .repair-button {
-                min-height: 32px;
-                border-radius: 8px;
-            }
-
-            .update-button {
-                min-height: 32px;
-                border-radius: 8px;
-            }
-
             .bottom-bar {
-                background: #1d1d23;
-                border-top: 1px solid alpha(white, 0.07);
-                padding: 12px 20px;
+                padding: 12px 22px;
+                border-top: 1px solid alpha(@window_fg_color, 0.09);
+                background: @window_bg_color;
             }
-
-            .bottom-status {
-                color: alpha(white, 0.68);
-                font-size: 12px;
-            }
-
-            .apply-button {
-                min-width: 190px;
-                min-height: 40px;
-                border-radius: 9px;
-                font-weight: 650;
-            }
-            """
-        )
-
+            .bottom-status { color: alpha(@window_fg_color, 0.72); font-size: 12px; }
+            .apply-button { min-height: 39px; min-width: 168px; }
+            .action-row { padding-top: 9px; }
+        """)
         display = Gdk.Display.get_default()
-
         if display:
-
             Gtk.StyleContext.add_provider_for_display(
-                display,
-                provider,
-                Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+                display, provider, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
             )
 
     # ========================================================
@@ -960,219 +876,110 @@ class DriverWindow(
     # ========================================================
 
     def build_ui(self):
-
-        root = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL
-        )
-
-        # ----------------------------------------------------
-        # HEADER
-        # ----------------------------------------------------
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
 
         header = Adw.HeaderBar()
-
-        title = Adw.WindowTitle(
-            title="DebGear",
-            subtitle="Hardware and driver management"
-        )
-
-        header.set_title_widget(
-            title
-        )
-
-        root.append(
-            header
-        )
-
-        # ----------------------------------------------------
-        # SCROLL
-        # ----------------------------------------------------
+        header.set_title_widget(Adw.WindowTitle(
+            title="DebGear", subtitle="Debian hardware & drivers"
+        ))
+        self.refresh_button = Gtk.Button.new_from_icon_name("view-refresh-symbolic")
+        self.refresh_button.set_tooltip_text("Rescan hardware and driver packages")
+        self.refresh_button.connect("clicked", lambda *_: self.start_refresh())
+        header.pack_end(self.refresh_button)
+        self.action_buttons.append(self.refresh_button)
+        root.append(header)
 
         scroll = Gtk.ScrolledWindow(
-            vexpand=True,
-            hscrollbar_policy=Gtk.PolicyType.NEVER
+            vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER
         )
+        clamp = Adw.Clamp()
+        clamp.set_maximum_size(1040)
+        clamp.set_tightening_threshold(680)
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=18)
+        content.set_margin_start(20)
+        content.set_margin_end(20)
+        content.add_css_class("debgear-content")
+        clamp.set_child(content)
+        scroll.set_child(clamp)
+        root.append(scroll)
 
-        content = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=16
+        hero = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
+        hero.add_css_class("hero")
+        hero_icon = Gtk.Image.new_from_icon_name("computer-symbolic")
+        hero_icon.set_pixel_size(40)
+        hero_icon.set_valign(Gtk.Align.START)
+        hero_icon.add_css_class("hero-icon")
+        hero.append(hero_icon)
+
+        intro_text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=5)
+        intro_text.set_hexpand(True)
+        title = Gtk.Label(label="Your hardware, at a glance", xalign=0, wrap=True)
+        title.add_css_class("page-title")
+        intro_text.append(title)
+        description = Gtk.Label(
+            label="Inspect kernel drivers, NVIDIA health and versions from your configured APT sources.",
+            xalign=0, wrap=True,
         )
+        description.add_css_class("page-description")
+        intro_text.append(description)
+        hero.append(intro_text)
+        content.append(hero)
 
-        content.add_css_class(
-            "content"
+        summary = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.summary_label = Gtk.Label(
+            label="Scanning your system…", xalign=0, hexpand=True, wrap=True
         )
+        self.summary_label.add_css_class("page-description")
+        summary.append(self.summary_label)
+        self.device_count = Gtk.Label(label="0 devices")
+        self.device_count.add_css_class("count-badge")
+        summary.append(self.device_count)
+        content.append(summary)
 
-        content.set_margin_top(26)
-        content.set_margin_bottom(26)
-        content.set_margin_start(30)
-        content.set_margin_end(30)
-
-        scroll.set_child(
-            content
-        )
-
-        root.append(
-            scroll
-        )
-
-        # ----------------------------------------------------
-        # INTRO
-        # ----------------------------------------------------
-
-        intro = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=12
-        )
-
-        intro_text = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=3,
-            hexpand=True
-        )
-
-        page_title = Gtk.Label(
-            label="System Hardware",
-            xalign=0
-        )
-
-        page_title.add_css_class(
-            "page-title"
-        )
-
-        page_description = Gtk.Label(
-            label=(
-                "View detected graphics and network hardware "
-                "and available drivers."
-            ),
-            xalign=0,
-            wrap=True
-        )
-
-        page_description.add_css_class(
-            "page-description"
-        )
-
-        intro_text.append(
-            page_title
-        )
-
-        intro_text.append(
-            page_description
-        )
-
-        intro.append(
-            intro_text
-        )
-
-        self.device_count = Gtk.Label(
-            label="0 devices"
-        )
-
-        self.device_count.add_css_class(
-            "count-badge"
-        )
-
-        self.device_count.set_valign(
-            Gtk.Align.CENTER
-        )
-
-        intro.append(
-            self.device_count
-        )
-
-        content.append(
-            intro
-        )
-
-        # ----------------------------------------------------
-        # SECTION
-        # ----------------------------------------------------
-
-        section = Gtk.Label(
-            label="HARDWARE",
-            xalign=0
-        )
-
-        section.add_css_class(
-            "section-label"
-        )
-
-        content.append(
-            section
-        )
-
-        # ----------------------------------------------------
-        # DEVICE LIST
-        # ----------------------------------------------------
+        heading_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        heading = Gtk.Label(label="DETECTED DEVICES", xalign=0, hexpand=True)
+        heading.add_css_class("section-label")
+        heading_row.append(heading)
+        self.search_entry = Gtk.SearchEntry()
+        self.search_entry.set_placeholder_text("Filter devices…")
+        self.search_entry.set_width_chars(18)
+        self.search_entry.connect("search-changed", self.on_search_changed)
+        heading_row.append(self.search_entry)
+        content.append(heading_row)
 
         self.device_list = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=8
+            orientation=Gtk.Orientation.VERTICAL, spacing=12
         )
+        loading = Gtk.Label(label="Detecting PCI hardware and APT packages…")
+        loading.set_margin_top(28)
+        self.device_list.append(loading)
+        content.append(self.device_list)
 
-        content.append(
-            self.device_list
-        )
-
-        # ----------------------------------------------------
-        # BOTTOM BAR
-        # ----------------------------------------------------
-
-        bottom = Gtk.Box(
-            orientation=Gtk.Orientation.HORIZONTAL,
-            spacing=15
-        )
-
-        bottom.add_css_class(
-            "bottom-bar"
-        )
-
+        bottom = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=15)
+        bottom.add_css_class("bottom-bar")
         self.bottom_status = Gtk.Label(
-            label="Checking drivers...",
-            xalign=0,
-            hexpand=True
+            label="Checking drivers…", xalign=0, hexpand=True, wrap=True
         )
+        self.bottom_status.add_css_class("bottom-status")
+        bottom.append(self.bottom_status)
+        self.apply_button = Gtk.Button(label="No pending changes")
+        self.apply_button.add_css_class("suggested-action")
+        self.apply_button.add_css_class("apply-button")
+        self.apply_button.connect("clicked", self.on_apply)
+        self.apply_button.set_sensitive(False)
+        self.action_buttons.append(self.apply_button)
+        bottom.append(self.apply_button)
+        root.append(bottom)
+        self.set_content(root)
 
-        self.bottom_status.add_css_class(
-            "bottom-status"
-        )
-
-        bottom.append(
-            self.bottom_status
-        )
-
-        self.apply_button = Gtk.Button(
-            label="Apply Changes"
-        )
-
-        self.apply_button.add_css_class(
-            "suggested-action"
-        )
-
-        self.apply_button.add_css_class(
-            "apply-button"
-        )
-
-        self.apply_button.connect(
-            "clicked",
-            self.on_apply
-        )
-
-        self.action_buttons.append(
-            self.apply_button
-        )
-
-        bottom.append(
-            self.apply_button
-        )
-
-        root.append(
-            bottom
-        )
-
-        self.set_content(
-            root
-        )
+    def on_search_changed(self, *_args):
+        query = self.search_entry.get_text().strip().casefold()
+        for device, card in self.device_card_map:
+            haystack = " ".join(
+                str(device.get(key, ""))
+                for key in ("name", "driver_name", "kernel", "vendor", "device")
+            ).casefold()
+            card.set_visible(query in haystack)
 
     # ========================================================
     # REFRESH (fix: scanning now happens off the GTK thread)
