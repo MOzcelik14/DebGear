@@ -1216,9 +1216,6 @@ class DriverWindow(
             card.append(row)
         return card
 
-    def on_search_changed(self, *_args):
-        return  # Search is replaced by dedicated, always-visible device sections.
-
     def copy_diagnostics(self, _button):
         lines = [
             "DebGear driver diagnostics",
@@ -1882,8 +1879,6 @@ class DriverWindow(
         if not self.supported_host or response != "update" or self.busy:
             return
         self.current_action = "Update NVIDIA to APT candidate " + version
-        if False:
-            return
         self.set_busy(True)
         self.bottom_status.set_text("Checking NVIDIA upgrade plan…")
         threading.Thread(
@@ -1972,8 +1967,6 @@ class DriverWindow(
         if not self.supported_host or response != "repair" or self.busy:
             return
         self.current_action = "Rebuild NVIDIA module for " + os.uname().release
-        if False:
-            return
         self.set_busy(True)
         self.bottom_status.set_text("Preparing the NVIDIA DKMS rebuild…")
         threading.Thread(
