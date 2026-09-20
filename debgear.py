@@ -985,549 +985,197 @@ class DriverWindow(
     # REFRESH (fix: scanning now happens off the GTK thread)
     # ========================================================
 
-    def start_refresh(self):
-
+    def start_refresh(self, force=False):
+        if self.busy and not force:
+            return
         self.set_busy(True)
-
-        self.bottom_status.set_text(
-            "Checking drivers..."
-        )
-
-        thread = threading.Thread(
-            target=self._scan_in_background,
-            daemon=True
-        )
-
-        thread.start()
+        self.bottom_status.set_text("Checking hardware and installed drivers…")
+        threading.Thread(target=self._scan_in_background, daemon=True).start()
 
     def _scan_in_background(self):
+        try:
+            if not shutil.which("lspci"):
+                raise RuntimeError("Hardware scan requires pciutils (lspci).")
+            devices = scan_hardware()
+            nvidia_device = next(
+                (d for d in devices
+                 if d["vendor"] == "10de" and d["type"] == "gpu"),
+                None,
+            )
+            nvidia_status = (
+                get_nvidia_status(nvidia_device["kernel"])
+                if nvidia_device else None
+            )
+            GLib.idle_add(self._apply_refresh, devices, nvidia_status)
+        except Exception as exc:
+            GLib.idle_add(self._refresh_failed, str(exc))
 
-        # Runs off the main thread: scan_hardware() and
-        # get_nvidia_status() together issue a couple dozen
-        # subprocess calls (lspci, dpkg-query, apt-cache policy,
-        # apt-cache madison, lsmod, nvidia-smi). Doing this on the
-        # GTK thread is what caused the UI to freeze on startup and
-        # after every apply/update/repair.
-        devices = scan_hardware()
-
-        nvidia_status = None
-
-        if any(
-            d["vendor"] == "10de" and d["type"] == "gpu"
-            for d in devices
-        ):
-
-            nvidia_status = get_nvidia_status()
-
-        GLib.idle_add(
-            self._apply_refresh,
-            devices,
-            nvidia_status
-        )
+    def _refresh_failed(self, message):
+        self.bottom_status.set_text("Unable to scan hardware.")
+        self.summary_label.set_text("Hardware scan failed")
+        self.set_busy(False)
+        self.show_dialog("Hardware Scan Failed", message)
+        return False
 
     def _apply_refresh(self, devices, nvidia_status):
-
         self.devices = devices
         self.nvidia_status = nvidia_status
         self.switches.clear()
+        self.original_state.clear()
+        self.device_card_map.clear()
+        self._nvidia_actions_added = False
+        self.action_buttons = [self.refresh_button, self.apply_button]
+        self.device_count.set_text(f"{len(devices)} devices")
 
-        self.device_count.set_text(
-            f"{len(self.devices)} devices"
-        )
+        while self.device_list.get_first_child():
+            self.device_list.remove(self.device_list.get_first_child())
 
-        while True:
-
-            child = (
-                self.device_list
-                .get_first_child()
+        if not devices:
+            empty = Gtk.Label(
+                label="No supported PCI graphics or network devices were detected.",
+                xalign=0, wrap=True,
             )
+            empty.set_margin_top(24)
+            self.device_list.append(empty)
 
-            if child is None:
-                break
+        for device in devices:
+            card = self.create_device_card(device)
+            self.device_card_map.append((device, card))
+            self.device_list.append(card)
 
-            self.device_list.remove(
-                child
-            )
-
-        for device in self.devices:
-
-            card = self.create_device_card(
-                device
-            )
-
-            self.device_list.append(
-                card
-            )
-
+        self.on_search_changed()
         self.update_global_status()
-
+        self.summary_label.set_text(
+            f"{sum(d['type'] == 'gpu' for d in devices)} graphics · "
+            f"{sum(d['type'] == 'network' for d in devices)} network devices"
+            if devices else "No matching hardware found"
+        )
         self.set_busy(False)
-
         return False
 
     # ========================================================
     # DEVICE CARD
     # ========================================================
 
-    def create_device_card(
-        self,
-        device
-    ):
-
-        card = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=10
-        )
-
-        card.add_css_class(
-            "device-card"
-        )
-
-        is_nvidia = (
-            device["vendor"] == "10de"
-            and device["type"] == "gpu"
-        )
-
+    def create_device_card(self, device):
+        is_nvidia = device["vendor"] == "10de" and device["type"] == "gpu"
+        card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=13)
+        card.add_css_class("device-card")
         if is_nvidia:
+            card.add_css_class("nvidia-card")
 
-            card.add_css_class(
-                "nvidia-card"
-            )
-
-        # ----------------------------------------------------
-        # TOP GRID
-        # ----------------------------------------------------
-
-        grid = Gtk.Grid(
-            column_spacing=22,
-            row_spacing=5
+        top = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=14)
+        icon = Gtk.Image.new_from_icon_name(
+            "video-display-symbolic" if device["type"] == "gpu"
+            else "network-wireless-symbolic"
         )
-
-        grid.set_hexpand(
-            True
-        )
-
-        # ----------------------------------------------------
-        # LEFT
-        # ----------------------------------------------------
-
-        left = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=3
-        )
-
-        left.set_hexpand(
-            True
-        )
-
-        name = Gtk.Label(
-            label=device["name"],
-            xalign=0,
-            wrap=True
-        )
-
-        name.add_css_class(
-            "device-name"
-        )
-
-        driver = Gtk.Label(
-            label=device["driver_name"],
-            xalign=0
-        )
-
-        driver.add_css_class(
-            "driver-name"
-        )
-
+        icon.set_pixel_size(23)
+        icon.set_valign(Gtk.Align.START)
+        icon.add_css_class("device-icon")
+        top.append(icon)
+        name_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        name_box.set_hexpand(True)
+        name = Gtk.Label(label=device["name"], xalign=0, wrap=True)
+        name.add_css_class("device-name")
+        name_box.append(name)
+        driver = Gtk.Label(label=device["driver_name"], xalign=0, wrap=True)
+        driver.add_css_class("driver-name")
+        name_box.append(driver)
         kernel = Gtk.Label(
-            label=f"Kernel driver: {device['kernel']}",
-            xalign=0
+            label=f"Kernel module: {device['kernel']}", xalign=0, wrap=True
         )
-
-        kernel.add_css_class(
-            "kernel-text"
-        )
-
-        left.append(
-            name
-        )
-
-        left.append(
-            driver
-        )
-
-        left.append(
-            kernel
-        )
-
-        grid.attach(
-            left,
-            0,
-            0,
-            1,
-            1
-        )
-
-        # ----------------------------------------------------
-        # RIGHT
-        # ----------------------------------------------------
-
-        right = Gtk.Box(
-            orientation=Gtk.Orientation.VERTICAL,
-            spacing=7
-        )
-
-        right.set_halign(
-            Gtk.Align.END
-        )
-
-        # ----------------------------------------------------
-        # STATUS (uses cached self.nvidia_status, no re-query)
-        # ----------------------------------------------------
-
-        status = self.create_status_widget(
-            device,
-            is_nvidia
-        )
-
-        right.append(
-            status
-        )
-
-        # ----------------------------------------------------
-        # VERSION GRID
-        # ----------------------------------------------------
-
-        version_grid = Gtk.Grid(
-            column_spacing=8,
-            row_spacing=2
-        )
-
-        current_label = Gtk.Label(
-            label="Installed:"
-        )
-
-        current_label.add_css_class(
-            "version-label"
-        )
-
-        current_value = Gtk.Label(
-            label=device[
-                "installed_version"
-            ]
-        )
-
-        current_value.add_css_class(
-            "version-value"
-        )
-
-        candidate_label = Gtk.Label(
-            label="APT candidate:"
-        )
-
-        candidate_label.add_css_class(
-            "version-label"
-        )
-
-        candidate_value = Gtk.Label(
-            label=device[
-                "candidate_version"
-            ]
-        )
-
-        candidate_value.add_css_class(
-            "version-value"
-        )
-
-        newest_label = Gtk.Label(
-            label="Latest:"
-        )
-
-        newest_label.add_css_class(
-            "version-label"
-        )
-
-        newest_value = Gtk.Label(
-            label=device[
-                "newest_version"
-            ]
-        )
-
-        newest_value.add_css_class(
-            "version-value"
-        )
-
-        version_grid.attach(
-            current_label,
-            0,
-            0,
-            1,
-            1
-        )
-
-        version_grid.attach(
-            current_value,
-            1,
-            0,
-            1,
-            1
-        )
-
-        version_grid.attach(
-            candidate_label,
-            0,
-            1,
-            1,
-            1
-        )
-
-        version_grid.attach(
-            candidate_value,
-            1,
-            1,
-            1,
-            1
-        )
-
-        version_grid.attach(
-            newest_label,
-            0,
-            2,
-            1,
-            1
-        )
-
-        version_grid.attach(
-            newest_value,
-            1,
-            2,
-            1,
-            1
-        )
-
-        right.append(
-            version_grid
-        )
-
-        # ----------------------------------------------------
-        # SOURCE
-        # ----------------------------------------------------
-
-        source = Gtk.Label(
-            label=device["source"],
-            xalign=1
-        )
-
-        source.add_css_class(
-            "source-label"
-        )
-
-        right.append(
-            source
-        )
-
-        grid.attach(
-            right,
-            1,
-            0,
-            1,
-            1
-        )
-
-        card.append(
-            grid
-        )
-
-        # ----------------------------------------------------
-        # NVIDIA ACTIONS (uses cached self.nvidia_status)
-        # ----------------------------------------------------
-
-        if is_nvidia and self.nvidia_status:
-
-            nvidia = self.nvidia_status
-
-            # -----------------------------------------------
-            # UPDATE AVAILABLE
-            # -----------------------------------------------
-
-            if nvidia["has_update"]:
-
-                separator = Gtk.Separator(
-                    orientation=Gtk.Orientation.HORIZONTAL
-                )
-
-                card.append(
-                    separator
-                )
-
-                update_row = Gtk.Box(
-                    orientation=Gtk.Orientation.HORIZONTAL,
-                    spacing=12
-                )
-
-                update_text = Gtk.Label(
-                    label=(
-                        f"New NVIDIA driver available: "
-                        f"{nvidia['newest_version']}"
-                    ),
-                    xalign=0,
-                    hexpand=True
-                )
-
-                update_text.add_css_class(
-                    "driver-name"
-                )
-
-                update_row.append(
-                    update_text
-                )
-
-                update_button = Gtk.Button(
-                    label="Update NVIDIA"
-                )
-
-                update_button.add_css_class(
-                    "update-button"
-                )
-
-                update_button.connect(
-                    "clicked",
-                    self.on_nvidia_update
-                )
-
-                # fix: tracked so set_busy() disables it too
-                self.action_buttons.append(
-                    update_button
-                )
-
-                update_button.set_sensitive(
-                    not self.busy
-                )
-
-                update_row.append(
-                    update_button
-                )
-
-                card.append(
-                    update_row
-                )
-
-            # -----------------------------------------------
-            # REPAIR
-            # -----------------------------------------------
-
-            if nvidia["status"] not in (
-                "active",
-            ):
-
-                separator = Gtk.Separator(
-                    orientation=Gtk.Orientation.HORIZONTAL
-                )
-
-                card.append(
-                    separator
-                )
-
-                action_row = Gtk.Box(
-                    orientation=Gtk.Orientation.HORIZONTAL,
-                    spacing=12
-                )
-
-                description = Gtk.Label(
-                    label=(
-                        "A problem with the NVIDIA "
-                        "kernel module was detected."
-                    ),
-                    xalign=0,
-                    hexpand=True
-                )
-
-                description.add_css_class(
-                    "driver-name"
-                )
-
-                action_row.append(
-                    description
-                )
-
-                repair_button = Gtk.Button(
-                    label="Repair NVIDIA Driver"
-                )
-
-                repair_button.add_css_class(
-                    "repair-button"
-                )
-
-                repair_button.connect(
-                    "clicked",
-                    self.on_nvidia_repair
-                )
-
-                # fix: tracked so set_busy() disables it too
-                self.action_buttons.append(
-                    repair_button
-                )
-
-                repair_button.set_sensitive(
-                    not self.busy
-                )
-
-                action_row.append(
-                    repair_button
-                )
-
-                card.append(
-                    action_row
-                )
-
-        # ----------------------------------------------------
-        # PACKAGE SWITCH
-        # ----------------------------------------------------
+        kernel.add_css_class("kernel-text")
+        name_box.append(kernel)
+        top.append(name_box)
+        status = self.create_status_widget(device, is_nvidia)
+        status.set_valign(Gtk.Align.START)
+        top.append(status)
+        card.append(top)
 
         if device["pkg"]:
+            card.append(Gtk.Separator())
+            versions = Gtk.Grid(column_spacing=16, row_spacing=7)
+            versions.set_hexpand(True)
+            for index, (title, value) in enumerate((
+                ("Installed", device["installed_version"]),
+                ("APT candidate", device["candidate_version"]),
+                ("Newest in sources", device["newest_version"]),
+                ("Source", device["source"]),
+            )):
+                label = Gtk.Label(label=title, xalign=0)
+                label.add_css_class("version-label")
+                versions.attach(label, 0, index, 1, 1)
+                version = Gtk.Label(label=value, xalign=0, wrap=True)
+                version.set_selectable(True)
+                version.add_css_class("version-value")
+                versions.attach(version, 1, index, 1, 1)
+            card.append(versions)
 
+        # The same NVIDIA package controls every NVIDIA card: only one switch.
+        package = device["pkg"]
+        if package and package not in self.switches:
+            card.append(Gtk.Separator())
             package_row = Gtk.Box(
-                orientation=Gtk.Orientation.HORIZONTAL,
-                spacing=10
+                orientation=Gtk.Orientation.HORIZONTAL, spacing=12
             )
-
-            package_label = Gtk.Label(
-                label="Package enabled",
-                xalign=0,
-                hexpand=True
+            text = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=3)
+            text.set_hexpand(True)
+            switch_label = Gtk.Label(
+                label="NVIDIA driver package", xalign=0
             )
-
-            package_label.add_css_class(
-                "driver-name"
+            switch_label.add_css_class("device-name")
+            text.append(switch_label)
+            hint = Gtk.Label(
+                label="Changes affect every GPU using this package.",
+                xalign=0, wrap=True,
             )
+            hint.add_css_class("driver-name")
+            text.append(hint)
+            package_row.append(text)
+            toggle = Gtk.Switch(active=device["installed"])
+            toggle.set_valign(Gtk.Align.CENTER)
+            toggle.connect("notify::active", self.update_action_state)
+            self.switches[package] = toggle
+            self.original_state[package] = device["installed"]
+            package_row.append(toggle)
+            card.append(package_row)
 
-            package_switch = Gtk.Switch(
-                active=device["installed"]
-            )
-
-            package_switch.set_valign(
-                Gtk.Align.CENTER
-            )
-
-            # fix: keyed by device_id, not package name, so two
-            # devices sharing the same package (e.g. dual NVIDIA
-            # GPUs) each keep their own switch instead of the
-            # second one overwriting the first in the dict.
-            self.switches[
-                device["device_id"]
-            ] = (device["pkg"], package_switch)
-
-            package_row.append(
-                package_label
-            )
-
-            package_row.append(
-                package_switch
-            )
-
-            card.append(
-                package_row
-            )
+        if is_nvidia and self.nvidia_status and not self._nvidia_actions_added:
+            self._nvidia_actions_added = True
+            nvidia = self.nvidia_status
+            note = None
+            if "enabled" in nvidia["secure_boot"].lower():
+                note = ("Secure Boot is enabled. Unsigned NVIDIA DKMS modules "
+                        "may require enrollment or signing.")
+            elif not nvidia["headers_installed"]:
+                note = (f"Headers for {nvidia['kernel_release']} are missing; "
+                        "the matching package must be available to rebuild DKMS.")
+            elif nvidia["status"] == "nouveau":
+                note = ("Nouveau currently owns this GPU. Installing NVIDIA "
+                        "may require a reboot before the driver switches.")
+            if note:
+                warning = Gtk.Label(label=note, xalign=0, wrap=True)
+                warning.add_css_class("kernel-text")
+                card.append(warning)
+            if nvidia["has_update"] or (
+                nvidia["installed"] and nvidia["status"] not in ("active", "nouveau")
+            ):
+                actions = Gtk.Box(
+                    orientation=Gtk.Orientation.HORIZONTAL, spacing=8
+                )
+                actions.add_css_class("action-row")
+                if nvidia["has_update"]:
+                    update = Gtk.Button(label="Install APT candidate")
+                    update.add_css_class("suggested-action")
+                    update.connect("clicked", self.on_nvidia_update)
+                    self.action_buttons.append(update)
+                    actions.append(update)
+                if nvidia["installed"] and nvidia["status"] not in ("active", "nouveau"):
+                    repair = Gtk.Button(label="Rebuild NVIDIA module")
+                    repair.connect("clicked", self.on_nvidia_repair)
+                    self.action_buttons.append(repair)
+                    actions.append(repair)
+                card.append(actions)
 
         return card
 
@@ -1535,80 +1183,29 @@ class DriverWindow(
     # STATUS WIDGET (uses cached self.nvidia_status)
     # ========================================================
 
-    def create_status_widget(
-        self,
-        device,
-        is_nvidia
-    ):
-
+    def create_status_widget(self, device, is_nvidia):
         if is_nvidia and self.nvidia_status:
-
-            nvidia = self.nvidia_status
-
-            status = nvidia[
-                "status"
-            ]
-
-            if status == "active":
-
-                label = "✓ Driver active"
-                css = "status-ok"
-
-            elif status == "kernel-active":
-
-                label = "⚠ Kernel driver active"
-                css = "status-warning"
-
-            elif status == "nouveau":
-
-                label = "⚠ Nouveau active"
-                css = "status-warning"
-
-            elif status == "module-loaded":
-
-                label = "⚠ NVIDIA module loaded"
-                css = "status-warning"
-
-            elif status == "installed-not-active":
-
-                label = "⚠ Driver not active"
-                css = "status-warning"
-
-            else:
-
-                label = "⚠ Driver not installed"
-                css = "status-error"
-
+            status = self.nvidia_status["status"]
+            label, css = {
+                "active": ("● NVIDIA active", "status-ok"),
+                "kernel-active": ("! SMI unavailable", "status-warning"),
+                "nouveau": ("● Nouveau in use", "status-warning"),
+                "module-loaded": ("! Check GPU binding", "status-warning"),
+                "installed-not-active": ("! Driver inactive", "status-warning"),
+                "not-installed": ("! Not installed", "status-error"),
+            }.get(status, ("! Unknown", "status-warning"))
         elif device["pkg"]:
-
-            if device["installed"]:
-
-                label = "✓ Package installed"
-                css = "status-ok"
-
-            else:
-
-                label = "⚠ Package not installed"
-                css = "status-warning"
-
+            label, css = (
+                ("● Package installed", "status-ok") if device["installed"]
+                else ("! Not installed", "status-warning")
+            )
+        elif device["kernel"] != "Not loaded":
+            label, css = "● Kernel driver", "status-ok"
         else:
-
-            label = "✓ System driver"
-            css = "status-ok"
-
-        status_label = Gtk.Label(
-            label=label
-        )
-
-        status_label.add_css_class(
-            css
-        )
-
-        status_label.set_halign(
-            Gtk.Align.END
-        )
-
-        return status_label
+            label, css = "! No kernel driver", "status-warning"
+        widget = Gtk.Label(label=label)
+        widget.add_css_class(css)
+        return widget
 
     # ========================================================
     # GLOBAL STATUS (uses cached self.nvidia_status)
@@ -1619,7 +1216,7 @@ class DriverWindow(
         if not self.nvidia_status:
 
             self.bottom_status.set_text(
-                "System drivers are working properly."
+                "Scan complete. Check each device's kernel module above."
             )
 
             return
@@ -1631,13 +1228,13 @@ class DriverWindow(
             if nvidia["has_update"]:
 
                 self.bottom_status.set_text(
-                    "NVIDIA is active. A new driver version is available."
+                    "NVIDIA is active. A newer APT candidate is available."
                 )
 
             else:
 
                 self.bottom_status.set_text(
-                    "NVIDIA driver is active and up to date."
+                    "NVIDIA is active. No newer APT candidate was found."
                 )
 
         elif nvidia["status"] == "kernel-active":
